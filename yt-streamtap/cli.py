@@ -10,10 +10,12 @@ import struct
 import portion as P
 import logging
 import argparse
+import threading
+from .core import parser
 
 logger = logging.getLogger(__name__)
 
-def collect_stream_data(url: str) -> dict:
+def collect_stream_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
     brave_proc = subprocess.Popen(
         ["/usr/bin/brave-browser", "--remote-debugging-port=9222"],
@@ -24,10 +26,17 @@ def collect_stream_data(url: str) -> dict:
     with sync_playwright() as pw:
 
         browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
-        context = browser.new_context(
-            locale="ja-JP",
-            viewport={"width": 1920, "height": 1080}
-        )
+        if record_browser:
+            context = browser.new_context(
+                locale="ja-JP",
+                viewport={"width": 1920, "height": 1080},
+                record_video_dir=f"record/{id}"
+            )
+        else:
+            context = browser.new_context(
+                locale="ja-JP",
+                viewport={"width": 1920, "height": 1080}
+            )
 
         context.set_default_timeout(5000)
         page = context.new_page()
@@ -46,14 +55,14 @@ def collect_stream_data(url: str) -> dict:
 
         quality_item = page.get_by_role("menuitemradio").filter(
             has_text=re.compile(r"\d+p")
-        ).nth(0)
+        ).nth(3)
 
         quality = re.findall(r"\d+", quality_item.inner_text())[0]
 
-        if int(quality) >= 1080:
+        # if int(quality) >= 1080:
 
-            page.evaluate("() => {window.__clearBufferRequested__ = true;}")
-            quality_item.click()
+        page.evaluate("() => {window.__clearBufferRequested__ = true;}")
+        quality_item.click()
 
         page.keyboard.press("Escape")
 
@@ -73,7 +82,7 @@ def collect_stream_data(url: str) -> dict:
         """)
         
         buffered = 0
-        ascii_art = ["⚪︎", "⚫︎", "⚬︎", "⚭︎", "⚮︎", "⚯︎", "⚰︎"]
+        ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
         current = 0
 
         while buffered < duration:
@@ -90,7 +99,7 @@ def collect_stream_data(url: str) -> dict:
                 }
             """)
 
-            print(f"{ascii_art[current % len(ascii_art)]} buffered: {int(buffered)} / {int(duration)} sec", end="\r")
+            print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r")
             current += 1
 
             page.evaluate(f"""
@@ -112,6 +121,8 @@ def collect_stream_data(url: str) -> dict:
         """)
 
         result = parse_batch(tmp_batch)
+
+        print("取得完了                                        ")
         
     brave_proc.kill()
     return result
@@ -202,6 +213,75 @@ def parse_batch(batch):
     if building_video:
         data["video"]["chunks"].append(building_video)
 
+    #------------------------------------------------------------
+
+    # chunk と解析結果をセットで持つ
+    chunk_infos = []
+
+    if data["video"]["type"] == "fmp4":
+        chunks = data["video"]["chunks"]
+
+        for j, chunk in enumerate(chunks):
+            r = parser.parse_fmp4(chunk)
+            r = parser.get_video_mp4_chunk_info(r)
+
+            ts_start = r["ts_start"]
+            ts_end = r["ts_end"]
+
+            chunk_infos.append({
+                "chunk": chunk,
+                "ts_start": ts_start,
+                "ts_end": ts_end,
+                "original_index": j,
+            })
+
+    elif data["video"]["type"] == "webm":
+        chunks = data["video"]["chunks"]
+
+        for j, chunk in enumerate(chunks):
+            r = parser.parse_webm(chunk)
+            r = parser.get_video_webm_cluster_info(r)
+
+            ts_start = r["ts_start"]
+            ts_end = r["ts_end"]
+
+            chunk_infos.append({
+                "chunk": chunk,
+                "ts_start": ts_start,
+                "ts_end": ts_end,
+                "original_index": j,
+            })
+
+    # ts_start 順に並び替え
+    chunk_infos.sort(key=lambda x: x["ts_start"])
+
+    data["video"]["chunks"] = [x["chunk"] for x in chunk_infos]
+
+    #------------------------------------------------------------
+
+    chunk_infos = []
+
+    chunks = data["audio"]["chunks"]
+
+    for j, chunk in enumerate(chunks):
+        r = parser.parse_webm(chunk)
+        r = parser.get_video_webm_cluster_info(r["1F43B675"])
+
+        ts_start = r["ts_start"]
+        ts_end = r["ts_end"]
+
+        chunk_infos.append({
+            "chunk": chunk,
+            "ts_start": ts_start,
+            "ts_end": ts_end,
+            "original_index": j,
+        })
+
+    # ts_start 順に並び替え
+    chunk_infos.sort(key=lambda x: x["ts_start"])
+
+    data["audio"]["chunks"] = [x["chunk"] for x in chunk_infos]
+
     return data
 
 def main():
@@ -218,15 +298,20 @@ def main():
         help="出力先ディレクトリ (デフォルト: output)"
     )
     parser.add_argument(
-        "--no-ffmpeg",
+        "--no-merge",
         action="store_true",
-        help="FFmpeg による結合を行わない (動画と音声を個別に保存)"
+        help="音声と動画の結合を行わない (動画と音声を個別に保存)"
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="ログレベル (デフォルト: INFO)"
+    )
+    parser.add_argument(
+        "--record-browser",
+        action="store_true",
+        help="デバッグ用にブラウザを録画する"
     )
     args = parser.parse_args()
 
@@ -246,18 +331,25 @@ def main():
 
     try:
   # ストリームデータ収集
-        result = collect_stream_data(args.url)
 
         # ファイル名用の UUID
         uid = str(uuid.uuid4())
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        id = f"{timestamp}_{uid}"
+
+        if args.record_browser:
+            print(f"ブラウザを録画中... ")
+
+        result = collect_stream_data(args.url, args.record_browser, id)
 
         if result["video"]["type"] == "fmp4":
-            video_path = os.path.join(args.output_dir, f"video_{uid}.mp4")
+            video_path = os.path.join(args.output_dir, f"video_{id}.mp4")
         elif result["video"]["type"] == "webm":
-            video_path = os.path.join(args.output_dir, f"video_{uid}.webm")
+            video_path = os.path.join(args.output_dir, f"video_{id}.webm")
 
-        audio_path = os.path.join(args.output_dir, f"audio_{uid}.webm")
-        output_path = os.path.join(args.output_dir, f"output_{uid}.webm")
+        audio_path = os.path.join(args.output_dir, f"audio_{id}.webm")
+        output_path = os.path.join(args.output_dir, f"output_{id}.mkv")
 
         with open(video_path, "wb") as f:
             f.write(result["video"]["init"] + b"".join(result["video"]["chunks"]))
@@ -265,30 +357,32 @@ def main():
         with open(audio_path, "wb") as f:
             f.write(result["audio"]["init"] + b"".join(result["audio"]["chunks"]))
 
-        if not args.no_ffmpeg:
-            # FFmpeg で結合
-            logging.info("FFmpeg で動画と音声を結合中...")
-            ffmpeg_cmd = [
-                "/usr/bin/ffmpeg",
-                "-i", video_path,
-                "-i", audio_path,
-                "-c", "copy",
-                output_path
+        if not args.no_merge:
+            print("動画と音声を結合中...")
+            mkvmerge_cmd = [
+                "/usr/bin/mkvmerge",
+                "-o", output_path,
+                video_path,
+                audio_path
             ]
+
+            print("実行コマンド：", " ".join(mkvmerge_cmd))
+
             proc = subprocess.run(
-                ffmpeg_cmd,
+                mkvmerge_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
             if proc.returncode != 0:
-                logging.error("FFmpeg 結合に失敗しました")
+                print("結合に失敗しました")
+                print(proc.stderr)
                 return 1
-            logging.info(f"結合完了: {output_path}")
+            logger.info(f"結合完了: {output_path}")
         else:
-            logging.info(f"動画: {video_path}, 音声: {audio_path} を個別に保存しました")
+            logger.info(f"動画: {video_path}, 音声: {audio_path} を個別に保存しました")
 
     except Exception as e:
-        logging.exception("処理中にエラーが発生") 
+        logger.exception("処理中にエラーが発生") 
         return 1
     finally:
         # Xvfb 終了
