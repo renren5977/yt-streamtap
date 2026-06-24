@@ -27,7 +27,7 @@ source: [brave official](https://brave.com/download/brave-browser/)
 
 #### Install yt-streamtap
 ```bash
-git clone https://github.com/YOUR_NAME/yt-streamtap.git
+git clone https://github.com/renren5977/yt-streamtap.git
 cd yt-streamtap
 pip install -e.
 ```
