@@ -15,32 +15,32 @@ logger = logging.getLogger(__name__)
 
 def cli():
     parser = argparse.ArgumentParser(
-        description="YouTube 動画・音声ストリームを取得し、結合する"
+        description="yt-streamtap is a command-line tool for downloading videos and other media streams from websites automatically."
     )
     parser.add_argument(
         "url",
-        help="取得する YouTube 動画の URL"
+        help="URL of the video to be downloaded"
     )
     parser.add_argument(
         "-o", "--output-dir",
         default="output",
-        help="出力先ディレクトリ (デフォルト: output)"
+        help="Output directory (default: output)"
     )
     parser.add_argument(
         "--no-merge",
         action="store_true",
-        help="音声と動画の結合を行わない (動画と音声を個別に保存)"
+        help="Don't merge video and audio into a single file"
     )
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="ログレベル (デフォルト: INFO)"
+        help="Log level (default: INFO)"
     )
     parser.add_argument(
         "--record-browser",
         action="store_true",
-        help="デバッグ用にブラウザを録画する"
+        help="Record browser for debugging"
     )
     args = parser.parse_args()
 

@@ -42,6 +42,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
                 viewport={"width": 1920, "height": 1080},
                 record_video_dir=f"record/{id}"
             )
+            os.makedirs(f"{os.getcwd()}/record", exist_ok=True)
         else:
             context = browser.new_context(
                 locale="ja-JP",
