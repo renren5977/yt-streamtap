@@ -104,6 +104,8 @@ def process_data(batch : list) -> dict:
         ts_start = r["ts_start"]
         ts_end = r["ts_end"]
 
+        print(ts_start, ts_end)
+
         chunk_infos.append({
             "chunk": chunk,
             "ts_start": ts_start,
