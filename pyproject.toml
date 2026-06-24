@@ -1,0 +1,12 @@
+
+[project]
+name = "yt-streamtap"
+version = "0.1.0"   # ← これ追加
+description = "yt stream tool"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["yt_streamtap*"]
+
+[project.scripts]
+yts = "yt_streamtap.cli:cli"
