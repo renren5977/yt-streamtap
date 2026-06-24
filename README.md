@@ -29,6 +29,8 @@ source: [brave official](https://brave.com/download/brave-browser/)
 ```bash
 git clone https://github.com/renren5977/yt-streamtap.git
 cd yt-streamtap
+python -m venv .venv
+source .venv/bin/activate
 pip install -e.
 ```
 
