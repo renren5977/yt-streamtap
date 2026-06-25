@@ -1,11 +1,11 @@
 import subprocess
 import os
+import socket
+import random
 from time import sleep
 import re
 from playwright.sync_api import sync_playwright
 import logging
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,23 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
     Collect data from video and audio stream.
     """
 
-    # Launch brave
+    # Launch brave (headless: Xvfb 不要で安定動作)
     brave_proc = subprocess.Popen(
-        ["/usr/bin/brave-browser", "--remote-debugging-port=9222", "--disable-web-security"],
+        ["/usr/bin/brave-browser", "--headless", "--remote-debugging-port=9222", "--disable-web-security", "--no-sandbox"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
+
+    # Wait for Brave's debugging port to be ready
+    for _ in range(30):
+        try:
+            s = socket.socket()
+            s.settimeout(1)
+            s.connect(("127.0.0.1", 9222))
+            s.close()
+            break
+        except:
+            sleep(0.5)
 
     # Connect to brave
     with sync_playwright() as pw:
@@ -70,7 +81,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
         quality_item = page.get_by_role("menuitemradio").filter(
             has_text=re.compile(r"\d+p")
-        ).nth(3)
+        ).nth(0)
         quality = re.findall(r"\d+", quality_item.inner_text())[0]
 
         print(f"quality: {quality}")
@@ -83,7 +94,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
         page.keyboard.press("Escape")
 
         # Stop video and seek to start
-        page.locator("video").click()
+        page.evaluate("document.querySelector('video')?.click()")
         page.evaluate(f"""
             () => {{
                 const video = document.querySelector('video');
@@ -118,45 +129,33 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
             if buffered < old_buffered:
                 brave_proc.kill()
-                raise RuntimeError("Buffering error")
+                raise RuntimeError("Buffering progress lost: browser discarded previously buffered data")
 
-            print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r")
+            print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r", flush=True)
             current += 1
 
             page.evaluate(f"""
                 () => {{
                     const video = document.querySelector('video');
-                    video.currentTime = {int((buffered - old_buffered) / 4 * 3 + old_buffered)};
+                    video.currentTime = {int((buffered - old_buffered)* random.uniform(0.5, 0.95) + old_buffered)};
                 }}
             """)
 
-            sleep(1)
+            sleep(random.uniform(1, 2.2))
 
-        page.evaluate(f"window.__sendBufferRequest__ = true;")
+        # ---- JS の __popSegment__() で segment を1件ずつ取得 ----
+        total = page.evaluate("window.__segmentBuffer__?.length || 0")
+        print(f"Receiving {total} segments...")
+        items = []
+        while True:
+            item = page.evaluate("window.__popSegment__()")
+            if item is None:
+                break
+            items.append(item)
+            if len(items) % 10 == 0 or len(items) == total:
+                print(f"  received {len(items)}/{total}")
 
-        tmp_batch = "うんち"
+        print(f"Complete: {len(items)} segments                                             ")
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                nonlocal tmp_batch
-
-                length = int(self.headers["Content-Length"])
-                tmp_batch = self.rfile.read(length)
-
-                self.send_response(200)
-                self.send_header("Access-Control-Allow-Origin", "*")  # ← CORS許可ヘッダー
-                self.end_headers()
-                self.wfile.write(b"ok")
-                print(f"Received {length} bytes")
-
-        server = HTTPServer(("127.0.0.1", 9223), Handler)
-        server.handle_request()
-
-        with open(f"{os.getcwd()}/record/batch_{id}.bin", "wb") as f:
-            f.write(tmp_batch)
-        tmp_batch = json.loads(tmp_batch.decode("utf-8"))
-
-        print("Complete                                             ")
-        
     brave_proc.kill()
-    return tmp_batch
+    return items

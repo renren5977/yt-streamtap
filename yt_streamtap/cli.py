@@ -1,7 +1,6 @@
-import subprocess
 import os
+import subprocess
 from datetime import datetime
-from playwright.sync_api import sync_playwright
 import base64
 import re
 import uuid
@@ -49,14 +48,6 @@ def cli():
 
     # 出力ディレクトリ作成
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Xvfb 起動（仮想ディスプレイ）
-    xvfb_proc = subprocess.Popen(
-        ["/usr/bin/Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac", "+extension", "RANDR"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    os.environ["DISPLAY"] = ":99"
 
     try:
   # ストリームデータ収集
@@ -112,11 +103,8 @@ def cli():
             logger.info(f"saved: {video_path}, {audio_path}")
 
     except Exception as e:
-        logger.exception("error") 
+        logger.exception("error")
         return 1
-    finally:
-        # Xvfb 終了
-        xvfb_proc.kill()
 
     return 0
 
