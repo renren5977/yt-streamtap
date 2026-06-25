@@ -4,6 +4,8 @@ from time import sleep
 import re
 from playwright.sync_api import sync_playwright
 import logging
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +16,9 @@ def with_retry(func):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                print(f"buffering error, retrying...")
+                print(f"buffering error: {e}")
+                os.system("kill -9 $(lsof -t -i:9222) 2>/dev/null; kill -9 $(lsof -t -i:9223) 2>/dev/null")
+                print("Retrying...")
                 last_exception = e
         raise last_exception
     return wrapper
@@ -27,7 +31,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
     # Launch brave
     brave_proc = subprocess.Popen(
-        ["/usr/bin/brave-browser", "--remote-debugging-port=9222"],
+        ["/usr/bin/brave-browser", "--remote-debugging-port=9222", "--disable-web-security"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
@@ -66,7 +70,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
         quality_item = page.get_by_role("menuitemradio").filter(
             has_text=re.compile(r"\d+p")
-        ).nth(0)
+        ).nth(3)
         quality = re.findall(r"\d+", quality_item.inner_text())[0]
 
         print(f"quality: {quality}")
@@ -128,14 +132,29 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
             sleep(1)
 
-        # Get buffered data
-        tmp_batch = page.evaluate("""
-            () => {
-                const buf = window.__segmentBuffer__ || [];
-                window.__segmentBuffer__ = [];
-                return buf;
-            }
-        """)
+        page.evaluate(f"window.__sendBufferRequest__ = true;")
+
+        tmp_batch = "うんち"
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                nonlocal tmp_batch
+
+                length = int(self.headers["Content-Length"])
+                tmp_batch = self.rfile.read(length)
+
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")  # ← CORS許可ヘッダー
+                self.end_headers()
+                self.wfile.write(b"ok")
+                print(f"Received {length} bytes")
+
+        server = HTTPServer(("127.0.0.1", 9223), Handler)
+        server.handle_request()
+
+        with open(f"{os.getcwd()}/record/batch_{id}.bin", "wb") as f:
+            f.write(tmp_batch)
+        tmp_batch = json.loads(tmp_batch.decode("utf-8"))
 
         print("Complete                                             ")
         
