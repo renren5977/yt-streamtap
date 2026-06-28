@@ -31,10 +31,18 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
     # Launch brave (headless: Xvfb 不要で安定動作)
     brave_proc = subprocess.Popen(
-        ["/usr/bin/brave-browser", "--headless", "--remote-debugging-port=9222", "--disable-web-security", "--no-sandbox"],
+        ["/usr/bin/brave-browser", "--remote-debugging-port=9222", "--disable-web-security", "--no-sandbox"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
+
+    xvfb_proc = subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    os.environ["DISPLAY"] = ":99"
 
     # Wait for Brave's debugging port to be ready
     for _ in range(30):
@@ -113,7 +121,11 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
         current = 0
 
         # Buffering
-        while buffered < duration:
+        while buffered != duration:
+            if buffered > duration:
+                brave_proc.kill()
+                xvfb_proc.kill()
+                raise RuntimeError("Buffering progress exceeded video duration")
             old_buffered = buffered
             buffered = page.evaluate("""
                 () => {
@@ -129,6 +141,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
             if buffered < old_buffered:
                 brave_proc.kill()
+                xvfb_proc.kill()
                 raise RuntimeError("Buffering progress lost: browser discarded previously buffered data")
 
             print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r", flush=True)
@@ -158,4 +171,5 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
         print(f"Complete: {len(items)} segments                                             ")
 
     brave_proc.kill()
+    xvfb_proc.kill()
     return items
