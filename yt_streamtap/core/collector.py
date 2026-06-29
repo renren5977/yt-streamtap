@@ -2,8 +2,9 @@ import subprocess
 import os
 import socket
 import random
-from time import sleep
+from time import sleep, time
 import re
+import json
 from playwright.sync_api import sync_playwright
 import logging
 
@@ -55,6 +56,9 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
         except:
             sleep(0.5)
 
+    # ---- ネットワークログ（軽量: ヘッダーのみ、ボディなし） ----
+    network_log = []
+
     # Connect to brave
     with sync_playwright() as pw:
 
@@ -75,100 +79,137 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
         context.set_default_timeout(5000)
         page = context.new_page()
 
-        # JSinjection
-        hook_path = os.path.join(os.getcwd(), "yt_streamtap/hook.js")
-        with open(hook_path, "r") as f:
-            page.add_init_script(f.read())
-        page.goto(url, wait_until="domcontentloaded")
+        def log_request(req):
+            network_log.append({
+                "t": time(),
+                "event": "request",
+                "url": req.url,
+                "method": req.method,
+                "type": req.resource_type,
+            })
+        def log_response(resp):
+            network_log.append({
+                "t": time(),
+                "event": "response",
+                "url": resp.request.url,
+                "status": resp.status,
+                "content_type": resp.headers.get("content-type", ""),
+                "content_length": resp.headers.get("content-length", ""),
+            })
+        def log_failure(fail):
+            network_log.append({
+                "t": time(),
+                "event": "requestfailed",
+                "url": fail.url,
+                "error": fail.failure if fail.failure else "unknown",
+            })
+        page.on("request", log_request)
+        page.on("response", log_response)
+        page.on("requestfailed", log_failure)
 
-        # If quality > 720p, switch to best quality (Auto caps at 720p)
-        page.locator("video").hover()
+        try:
+            # JSinjection
+            hook_path = os.path.join(os.getcwd(), "yt_streamtap/hook.js")
+            with open(hook_path, "r") as f:
+                page.add_init_script(f.read())
+            page.goto(url, wait_until="domcontentloaded")
 
-        page.locator(".ytp-settings-button").click()
-        page.get_by_text("画質", exact=True).click()
+            # If quality > 720p, switch to best quality (Auto caps at 720p)
+            page.locator("video").hover()
 
-        quality_item = page.get_by_role("menuitemradio").filter(
-            has_text=re.compile(r"\d+p")
-        ).nth(0)
-        quality = re.findall(r"\d+", quality_item.inner_text())[0]
+            page.locator(".ytp-settings-button").click()
+            page.get_by_text("画質", exact=True).click()
 
-        print(f"quality: {quality}")
+            quality_item = page.get_by_role("menuitemradio").filter(
+                has_text=re.compile(r"\d+p")
+            ).nth(0)
+            quality = re.findall(r"\d+", quality_item.inner_text())[0]
 
-        if int(quality) >= 1080:
+            print(f"quality: {quality}")
 
-            page.evaluate("() => {window.__clearBufferRequested__ = true;}")
-            quality_item.click()
+            if int(quality) >= 1080:
 
-        page.keyboard.press("Escape")
+                page.evaluate("() => {window.__clearBufferRequested__ = true;}")
+                quality_item.click()
 
-        # Stop video and seek to start
-        page.evaluate("document.querySelector('video')?.click()")
-        page.evaluate(f"""
-            () => {{
-                const video = document.querySelector('video');
-                video.currentTime = 0;
-            }}
-        """)
+            page.keyboard.press("Escape")
 
-        duration = page.evaluate("""
-            () => {
-                const video = document.querySelector('video');
-                return video.duration;
-            }
-        """)
-        buffered = 0
-        ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-        current = 0
-
-        # Buffering
-        while buffered != duration:
-            if buffered > duration:
-                brave_proc.kill()
-                xvfb_proc.kill()
-                raise RuntimeError("Buffering progress exceeded video duration")
-            old_buffered = buffered
-            buffered = page.evaluate("""
-                () => {
-                    const video = document.querySelector('video');
-
-                    if (!video || !video.buffered || video.buffered.length === 0) {
-                        return 0;
-                    }
-
-                    return video.buffered.end(0);
-                }
-            """)
-
-            if buffered < old_buffered:
-                brave_proc.kill()
-                xvfb_proc.kill()
-                raise RuntimeError("Buffering progress lost: browser discarded previously buffered data")
-
-            print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r", flush=True)
-            current += 1
-
+            # Stop video and seek to start
+            page.evaluate("document.querySelector('video')?.click()")
             page.evaluate(f"""
                 () => {{
                     const video = document.querySelector('video');
-                    video.currentTime = {int((buffered - old_buffered)* random.uniform(0.5, 0.95) + old_buffered)};
+                    video.currentTime = 0;
                 }}
             """)
 
-            sleep(random.uniform(1, 2.2))
+            duration = page.evaluate("""
+                () => {
+                    const video = document.querySelector('video');
+                    return video.duration;
+                }
+            """)
+            buffered = 0
+            ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+            current = 0
 
-        # ---- JS の __popSegment__() で segment を1件ずつ取得 ----
-        total = page.evaluate("window.__segmentBuffer__?.length || 0")
-        print(f"Receiving {total} segments...")
-        items = []
-        while True:
-            item = page.evaluate("window.__popSegment__()")
-            if item is None:
-                break
-            items.append(item)
-            if len(items) % 10 == 0 or len(items) == total:
-                print(f"  received {len(items)}/{total}")
+            # Buffering
+            while buffered != duration:
+                if buffered > duration:
+                    brave_proc.kill()
+                    xvfb_proc.kill()
+                    raise RuntimeError("Buffering progress exceeded video duration")
+                old_buffered = buffered
+                buffered = page.evaluate("""
+                    () => {
+                        const video = document.querySelector('video');
 
-        print(f"Complete: {len(items)} segments                                             ")
+                        if (!video || !video.buffered || video.buffered.length === 0) {
+                            return 0;
+                        }
+
+                        return video.buffered.end(0);
+                    }
+                """)
+
+                if buffered < old_buffered:
+                    brave_proc.kill()
+                    xvfb_proc.kill()
+                    raise RuntimeError("Buffering progress lost: browser discarded previously buffered data")
+
+                print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r", flush=True)
+                current += 1
+
+                page.evaluate(f"""
+                    () => {{
+                        const video = document.querySelector('video');
+                        video.currentTime = {(buffered - old_buffered)* random.uniform(0.5, 0.95) + old_buffered};
+                    }}
+                """)
+
+                sleep(random.uniform(0.3, 1.2))
+
+            # ---- JS の __popSegment__() で segment を1件ずつ取得 ----
+            total = page.evaluate("window.__segmentBuffer__?.length || 0")
+            print(f"Receiving {total} segments...")
+            items = []
+            while True:
+                item = page.evaluate("window.__popSegment__()")
+                if item is None:
+                    break
+                items.append(item)
+                if len(items) % 10 == 0 or len(items) == total:
+                    print(f"  received {len(items)}/{total}")
+
+            print(f"Complete: {len(items)} segments                                             ")
+
+        finally:
+            # 成功/失敗にかかわらずネットワークログを保存
+            netlog_path = os.path.join(os.getcwd(), "output", f"net_{id}.json")
+            os.makedirs(os.path.join(os.getcwd(), "output"), exist_ok=True)
+            with open(netlog_path, "w") as f:
+                json.dump(network_log, f, ensure_ascii=False)
+            print(f"Network log saved: {netlog_path}")
 
     brave_proc.kill()
     xvfb_proc.kill()
