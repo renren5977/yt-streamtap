@@ -154,11 +154,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
             current = 0
 
             # Buffering
-            while buffered != duration:
-                if buffered > duration:
-                    brave_proc.kill()
-                    xvfb_proc.kill()
-                    raise RuntimeError("Buffering progress exceeded video duration")
+            while buffered < duration:
                 old_buffered = buffered
                 buffered = page.evaluate("""
                     () => {

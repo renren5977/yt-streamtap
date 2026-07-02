@@ -1,0 +1,370 @@
+# parser.py モジュール ドキュメント
+
+yt_streamtap/core/parser.py の各関数のフローチャートと説明。
+
+---
+
+## 1. parse_fmp4(data: bytes) -> dict
+
+**説明**: fMP4 (Fragmented MP4) のバイナリデータを再帰的にパースし、
+ISOBMFF の Box 構造を dict で返す。コンテナ Box はネストされ、
+リーフ Box は生バイト列として保持される。
+
+**フローチャート**:
+
+```
+  [入力: data (bytes)]
+         │
+         ▼
+  ┌─────────────────────────┐
+  │ offset = 0              │
+  │ end = len(data)         │
+  └──────────┬──────────────┘
+             │
+             ▼
+  ┌─────────────────────────┐
+  │ while offset < end?     │
+  │   NO ───→ return result │
+  │   YES                   │
+  └──────────┬──────────────┘
+             │
+             ▼
+     Box header (8 bytes) 読込
+  ┌─────────────────────────┐
+  │ size = data[0:4] (BE)   │
+  │ type = data[4:8] (ascii)│
+  │ next = offset + size    │
+  └──────────┬──────────────┘
+             │
+      ┌──────┴──────┐
+      ▼              ▼
+   type∈CONTAINER?   else
+  ┌──────────┐  ┌──────────┐
+  │ 子Boxを   │  │ そのまま │
+  │ parse()  │  │ bytes保存│
+  │ recursive│  │          │
+  └────┬─────┘  └────┬─────┘
+       │              │
+       └──────┬───────┘
+              ▼
+       offset = next
+       ─────→ whileループ
+              
+  例外: UnicodeDecodeError
+  → エラーデータを tmp/ に保存し再raise
+```
+
+**CONTAINER_BOXES**: moov, trak, mdia, minf, stbl, edts, dinf, moof, traf, mvex, mfra, udta, meta
+
+---
+
+## 2. parse_webm(data: bytes) -> dict
+
+**説明**: WebM (EBML ベース) のバイナリデータを再帰的にパースし、
+Element ID をキーとした dict を返す。VINT (Variable-length Integer)
+を使って Element ID と Data Size を読み取る。
+
+**フローチャート**:
+
+```
+  [入力: data (bytes)]
+         │
+         ▼
+  ┌─────────────────────────┐
+  │ parse(0, len(data))     │
+  └──────────┬──────────────┘
+             │
+             ▼
+  ┌─────────────────────────┐
+  │ while offset < end ?    │
+  │   NO ───→ return result │
+  │   YES                   │
+  └──────────┬──────────────┘
+             │
+    read_elem_id() で ID 読込
+  ┌─────────────────────────┐
+  │ b = data[offset]        │
+  │ if b & 0x80 → n=1       │
+  │   elif 0x40 → n=2       │
+  │   elif 0x20 → n=3       │
+  │   elif 0x10 → n=4       │
+  │   else → raise           │
+  │ elem_id = data[0:n]     │
+  └──────────┬──────────────┘
+             │
+    read_vint() で Size 読込
+  ┌─────────────────────────┐
+  │ b & mask で実サイズ計算  │
+  │ 全ビット1 → -1 (不定)   │
+  │ def: mask = 0x7F/0x3F/..│
+  └──────────┬──────────────┘
+             │
+      ┌──────┴──────┐
+      ▼              ▼
+   key∈CONTAINERS?   else
+  ┌──────────┐  ┌──────────┐
+  │ 子要素を  │  │ 生bytes  │
+  │ parse()  │  │ として保存│
+  │ recursive│  │          │
+  └────┬─────┘  └────┬─────┘
+       │              │
+       └──────┬───────┘
+              ▼
+       offset = data_end
+       ─────→ whileループ
+```
+
+**キーとなる内部関数**:
+- `read_elem_id(offset)` → VINT のマーカービットを保持したまま ID 値を読む（最大4バイト）
+- `read_vint(offset)` → VINT のマーカービットをマスクしてデータサイズ値を読む（最大8バイト、-1=不定サイズ）
+
+**CONTAINERS**: EBML(1A45DFA3), Segment(18538067), Info(1549A966),
+Tracks(1654AE6B), Cluster(1F43B675), BlockGroup(A0), etc.
+
+---
+
+## 3. get_video_chunk_info(data, type="fmp4")
+
+**説明**: 動画 chunk (moof または Cluster) のタイムスタンプ範囲を取得する。
+fmp4 の場合は moof > traf から tfdt(基準TS) + tfhd(default duration) × sample_count、
+webm の場合は Cluster 内の全 Block の最小・最大タイムスタンプを返す。
+
+**フローチャート**:
+
+```
+  [入力: data (bytes), type ("fmp4" | "webm")]
+         │
+         ▼
+  type == "fmp4" ? ──YES──→ parse_fmp4(data)
+         │                   │
+         │                   ▼
+         │         get_video_fmp4_segment_info()
+         │         ┌─────────────────────────┐
+         │         │ traf = data["moof"]["traf"]│
+         │         │ tfdt → ts_start          │
+         │         │ trun → sample_count       │
+         │         │ tfhd → default_duration   │
+         │         │ chunk_duration =           │
+         │         │   sample_count *           │
+         │         │   default_sample_duration │
+         │         │ ts_end = ts_start + dur    │
+         │         │ return {ts_start, ts_end}  │
+         │         └─────────────────────────┘
+         │
+         ▼
+  type == "webm" ? ──YES──→ parse_webm(data)
+         │                   │
+         │                   ▼
+         │         get_video_webm_cluster_info()
+         │         ┌─────────────────────────┐
+         │         │ cluster_ts = E7(E7)     │
+         │         │ timestamps = [cluster_ts]│
+         │         │ A3, A0>Block → 各Block  │
+         │         │   relative ts を読む     │
+         │         │   abs_ts = cluster+rel  │
+         │         │   timestamps.append()    │
+         │         │ ts_start = min(tss)      │
+         │         │ ts_end   = max(tss)      │
+         │         │ return {ts_start, ts_end,│
+         │         │         cluster_ts,       │
+         │         │         estimated_end}    │
+         │         └─────────────────────────┘
+         │
+         ▼
+     else → raise
+```
+
+**Block相対TS読み取り** (`read_block_relative_timestamp`):
+
+```
+  block[0] で TrackNumber VINT 長を判定
+      │
+      ▼
+  ts_offset = track_number_size
+      │
+      ▼
+  block[ts_offset:ts_offset+2] を int16(big, signed) で読む
+```
+
+---
+
+## 4. get_audio_chunk_info(data)
+
+**説明**: 音声 chunk (WebM Cluster) のタイムスタンプ範囲を取得する。
+get_video_chunk_info の webm 版とほぼ同一のロジック。
+常に webm としてパースし、Cluster dict を処理する。
+
+**フローチャート**:
+
+```
+  [入力: data (bytes)]
+         │
+         ▼
+  parse_webm(data) → dict
+         │
+         ▼
+  data["1F43B675"]  ... 最初の Cluster を取得
+         │
+         ▼
+  get_audio_webm_cluster_info(cluster)
+      ┌─────────────────────────┐
+      │ cluster_ts = E7(E7)    │
+      │ timestamps = [clust_ts] │
+      │ A3 / A0>A1 Block 読込  │
+      │   → abs timestamp       │
+      │ ts_start = min(tss)     │
+      │ ts_end   = max(tss)     │
+      │ return {...}            │
+      └─────────────────────────┘
+```
+
+---
+
+## 5. _detect_init_type(data: bytes) -> str
+
+**説明**: init データの先頭バイトからフォーマット (fmp4/webm) を自動判別する。
+processor.py と同じロジックを使用:
+- `data[4:8] == b"ftyp"` → fmp4
+- `data[24:28] == b"webm"` → webm
+
+## 6. get_video_init_info(data: bytes) -> dict  [✅ 自動判別対応]
+
+**説明**: 動画の初期化情報 (init segment) から動画全体の長さ (duration) を取得する。
+フォーマットは `_detect_init_type()` で自動判別する。
+fmp4 は moov > mvhd、webm は Segment > Info の Duration を読む。
+type 引数は不要になった。
+
+## 7. get_audio_init_info(data: bytes) -> dict  [✅ new!]
+
+**説明**: 音声の初期化情報 (init segment) から音声全体の長さ (duration) を取得する。
+音声 init は常に webm 形式なので `parse_webm()` + `_get_webm_init_info()` を使う。
+戻り値は get_video_init_info と同一形式。
+
+**戻り値**: `{timescale, duration, duration_ms, duration_sec}`
+
+**フローチャート**:
+
+```
+  [入力: data (bytes), type ("fmp4" | "webm")]
+         │
+         ▼
+  type == "fmp4" ? ──YES──→ parse_fmp4(data)
+         │                   │
+         │                   ▼
+         │         get_video_fmp4_init_info()
+         │         ┌─────────────────────────┐
+         │         │ mvhd = moov["mvhd"]     │
+         │         │ version = mvhd[0]       │
+         │         │                         │
+         │         │ v==0: fields all 4byte  │
+         │         │   timescale = mvhd[12:16]│
+         │         │   duration  = mvhd[16:20]│
+         │         │ v==1: fields 8byte混在  │
+         │         │   timescale = mvhd[20:24]│
+         │         │   duration  = mvhd[24:32]│
+         │         │                         │
+         │         │ dur_sec = dur/tscale    │
+         │         │ dur_ms  = round(dur_sec │
+         │         │          * 1000)        │
+         │         │ return {timescale,      │
+         │         │         duration,        │
+         │         │         duration_ms,     │
+         │         │         duration_sec}    │
+         │         └─────────────────────────┘
+         │
+         ▼
+  type == "webm" ? ──YES──→ parse_webm(data)
+         │                   │
+         │                   ▼
+         │         get_video_webm_init_info()
+         │         ┌─────────────────────────┐
+         │         │ seg= data["18538067"]   │
+         │         │ info= seg["1549A966"]   │
+         │         │                         │
+         │         │ TimecodeScale(2AD7B1):  │
+         │         │   uint, def=1000000(ns) │
+         │         │ Duration(4489):         │
+         │         │   EBML float (4 or 8B) │
+         │         │   struct.unpack(">f/d") │
+         │         │                         │
+         │         │ dur_ns= dur * tc_scale │
+         │         │ dur_sec= dur_ns / 1e9  │
+         │         │ dur_ms = round(dur_sec │
+         │         │          * 1000)        │
+         │         │ return {timecode_scale, │
+         │         │         duration,        │
+         │         │         duration_ms,     │
+         │         │         duration_sec}    │
+         │         └─────────────────────────┘
+         │
+         ▼
+     else → raise ValueError
+```
+
+**mvhd 構造 (fMP4)**:
+```
++---------+--------+---------------+------------------+
+|version  | flags  | creation_time | modification_time|
+| 1 byte  | 3 byte | (4 or 8 byte) | (4 or 8 byte)   |
++---------+--------+---------------+------------------+
+| timescale       | duration (4 or 8 byte) | ...      |
+| 4 byte          |                        |          |
++-----------------+------------------------+----------+
+```
+
+**Segment Info 構造 (WebM)**:
+```
+Segment (18538067)
+  └─ Info (1549A966)
+       ├─ TimecodeScale (2AD7B1) : uint, default=1000000ns
+       ├─ Duration (4489)        : EBML float (32 or 64-bit)
+       └─ ...
+```
+
+---
+
+## 関数間の関係図
+
+```
+                         ┌──────────────┐
+                         │  parse_fmp4() │
+                         │  (再帰Box読)  │
+                         └──────┬───────┘
+                                │
+            ┌───────────────────┼──────────────────┐
+            ▼                   ▼                   ▼
+  ┌─────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+  │get_video_chunk_ │  │ get_video_init_  │  │  (音声 chunk    │
+  │ info() (fmp4)   │  │ info() (fmp4)    │  │  も同様)        │
+  └─────────────────┘  └──────────────────┘  └──────────────────┘
+
+                         ┌──────────────┐
+                         │  parse_webm() │
+                         │ (再帰EBML読)  │
+                         └──────┬───────┘
+                                │
+            ┌───────────────────┼──────────────────┐
+            ▼                   ▼                   ▼
+  ┌─────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+  │get_video_chunk_ │  │ get_video_init_  │  │ get_audio_chunk_ │
+  │ info() (webm)   │  │ info() (webm)    │  │ info() (webm)    │
+  └─────────────────┘  └──────────────────┘  └──────────────────┘
+```
+
+---
+
+## 補足: VINT の読み方
+
+```
+  1バイト目    長さ    マスク    取り得る値の範囲
+  1xxx xxxx    1       0x7F      0 ~ 127
+  01xx xxxx    2       0x3F      0 ~ 16383
+  001x xxxx    3       0x1F      0 ~ 2097151
+  0001 xxxx    4       0x0F      0 ~ 268435455
+  ...
+  0000 0001    8       0x00      0 ~ (2^56-1)
+```
+
+Element ID はマーカービットを保持したまま数値化し、
+Data Size はマーカービットをマスクして値を得る。
+全ビットが1の場合、不定サイズ (unknown size) を意味する。
