@@ -1,7 +1,7 @@
-import subprocess
 import os
+import csv
+import subprocess
 from datetime import datetime
-from playwright.sync_api import sync_playwright
 import base64
 import re
 import uuid
@@ -10,8 +10,40 @@ import portion as P
 import logging
 import argparse
 from .core import collector, processor
+import traceback
 
 logger = logging.getLogger(__name__)
+
+
+def save_timeline_csv(timeline: list, output_path: str):
+    """
+    timeline をCSVに保存する。
+    カラム: wall_time_s, video_time_s, seq, track, data_type, is_valid, size_bytes, hash, ts_start, ts_end, duration, timescale
+    """
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "wall_time_s", "video_time_s", "seq", "track", "data_type",
+            "is_valid", "size_bytes", "hash", "ts_start", "ts_end",
+            "duration", "timescale"
+        ])
+        for row in timeline:
+            writer.writerow([
+                f"{row['wall_time']:.4f}" if row['wall_time'] else "",
+                f"{row['video_time']:.4f}" if row['video_time'] >= 0 else "",
+                row['seq'],
+                row['track'],
+                row['data_type'],
+                str(row['is_valid']),
+                row['size'],
+                row['hash'],
+                row['ts_start'],
+                row['ts_end'],
+                row['duration'],
+                row['timescale'],
+            ])
+
 
 def cli():
     parser = argparse.ArgumentParser(
@@ -42,82 +74,101 @@ def cli():
         action="store_true",
         help="Record browser for debugging"
     )
+    parser.add_argument(
+        "-r", "--retry-count",
+        type=int,
+        default=1,
+        help="Number of retries (default: 1)"
+    )
     args = parser.parse_args()
 
     # ロギング設定
     logging.basicConfig(level=getattr(logging, args.log_level))
 
-    # 出力ディレクトリ作成
-    os.makedirs(args.output_dir, exist_ok=True)
 
-    # Xvfb 起動（仮想ディスプレイ）
-    xvfb_proc = subprocess.Popen(
-        ["/usr/bin/Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac", "+extension", "RANDR"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    os.environ["DISPLAY"] = ":99"
+    # ストリームデータ収集
+    uid = str(uuid.uuid4())
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    id = f"{timestamp}{uid}"
+    dir = f"{args.output_dir}/{id}"
+    print(f"Output directory: {dir}")
+    os.makedirs(dir, exist_ok=True)
+    error_log_path = os.path.join(dir, "error.log")
 
-    try:
-  # ストリームデータ収集
+    if args.record_browser:
+        print(f"Recording browser... ")
 
-        # ファイル名用の UUID
-        uid = str(uuid.uuid4())
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    retry_count = 0
+    while retry_count < args.retry_count:
+        try:
+            # データ収集・処理
+            try:
+                raw = collector.collect_data(args.url, args.record_browser, dir)
+            except Exception as e:
+                with open(error_log_path, "a", encoding="utf-8") as f:
+                    f.write("=" * 80 + "\n")
+                    f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
+                    traceback.print_exc(file=f)
+                    f.write("\n")
+                raise RuntimeError(f"Failed to collect data.")
+                
+            proc = processor.Processor(raw)
+            built = proc.built
+            csv_log = proc.get_timeline_log()
 
-        id = f"{timestamp}_{uid}"
+            # CSV保存 (cli.py 側で行う)
+            csv_path = os.path.join(dir, "timeline.csv")
+            with open(csv_path, "w") as f:
+                writer = csv.writer(f)
+                writer.writerows(csv_log)
 
-        if args.record_browser:
-            print(f"Recording browser... ")
+            # 動画/音声ファイル保存
+            if built["video"]["type"] == "fmp4":
+                video_path = os.path.join(dir, f"video.mp4")
+            elif built["video"]["type"] == "webm":
+                video_path = os.path.join(dir, f"video.webm")
+            else:
+                raise ValueError(f"Unknown video type: {built['video']['type']}")
+            audio_path = os.path.join(dir, f"audio.mp4")
+            output_path = os.path.join(dir, f"output.mkv")
 
-        result = collector.collect_data(args.url, args.record_browser, id)
-        result = processor.process_data(result)
+            with open(video_path, "wb") as f:
+                f.write(built["video"]["init"] + b"".join(built["video"]["chunks"]))
 
-        if result["video"]["type"] == "fmp4":
-            video_path = os.path.join(args.output_dir, f"video_{id}.mp4")
-        elif result["video"]["type"] == "webm":
-            video_path = os.path.join(args.output_dir, f"video_{id}.webm")
+            with open(audio_path, "wb") as f:
+                f.write(built["audio"]["init"] + b"".join(built["audio"]["chunks"]))
 
-        audio_path = os.path.join(args.output_dir, f"audio_{id}.webm")
-        output_path = os.path.join(args.output_dir, f"output_{id}.mkv")
+            if not args.no_merge:
+                print("merging video and audio...")
+                mkvmerge_cmd = [
+                    "/usr/bin/mkvmerge",
+                    "-o", output_path,
+                    video_path,
+                    audio_path
+                ]
 
-        with open(video_path, "wb") as f:
-            f.write(result["video"]["init"] + b"".join(result["video"]["chunks"]))
+                print("command:", " ".join(mkvmerge_cmd))
 
-        with open(audio_path, "wb") as f:
-            f.write(result["audio"]["init"] + b"".join(result["audio"]["chunks"]))
+                proc = subprocess.run(
+                    mkvmerge_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Failed to merge video and audio.")
+                else:
+                    print(f"Successed")
+                    break
 
-        if not args.no_merge:
-            print("merging video and audio...")
-            mkvmerge_cmd = [
-                "/usr/bin/mkvmerge",
-                "-o", output_path,
-                video_path,
-                audio_path
-            ]
-
-            print("command:", " ".join(mkvmerge_cmd))
-
-            proc = subprocess.run(
-                mkvmerge_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            if proc.returncode != 0:
-                print("Failed to merge")
-                print(proc.stderr)
-                return 1
-            print(f"Successed: {output_path}")
-        else:
-            logger.info(f"saved: {video_path}, {audio_path}")
-
-    except Exception as e:
-        logger.exception("error") 
+        except Exception as e:
+            print(f"Error: {e}")
+            print(f"Retrying in 1 seconds...")
+            sleep(1)
+            retry_count += 1
+    else:
+        print(f"Failed after {retry_count} retries. Exiting.")
         return 1
-    finally:
-        # Xvfb 終了
-        xvfb_proc.kill()
-
+    
     return 0
 
 if __name__ == "__main__":

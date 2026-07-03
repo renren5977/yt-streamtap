@@ -1,7 +1,10 @@
 import subprocess
 import os
-from time import sleep
+import socket
+import random
+from time import sleep, time
 import re
+import json
 from playwright.sync_api import sync_playwright
 import logging
 
@@ -14,23 +17,44 @@ def with_retry(func):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                print(f"buffering error, retrying...")
+                print(f"buffering error: {e}")
+                os.system("kill -9 $(lsof -t -i:9222) 2>/dev/null; kill -9 $(lsof -t -i:9223) 2>/dev/null")
+                print("Retrying...")
                 last_exception = e
         raise last_exception
     return wrapper
 
-@with_retry
-def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
+# @with_retry
+def collect_data(url: str, record_browser: bool=False, dir: str="") -> dict:
     """
     Collect data from video and audio stream.
     """
 
-    # Launch brave
+    # Launch brave (headless: Xvfb 不要で安定動作)
     brave_proc = subprocess.Popen(
-        ["/usr/bin/brave-browser", "--remote-debugging-port=9222"],
+        ["/usr/bin/brave-browser", "--remote-debugging-port=9222", "--disable-web-security", "--no-sandbox"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
+
+    xvfb_proc = subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    os.environ["DISPLAY"] = ":99"
+
+    # Wait for Brave's debugging port to be ready
+    for _ in range(30):
+        try:
+            s = socket.socket()
+            s.settimeout(1)
+            s.connect(("127.0.0.1", 9222))
+            s.close()
+            break
+        except:
+            sleep(0.5)
 
     # Connect to brave
     with sync_playwright() as pw:
@@ -40,7 +64,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
             context = browser.new_context(
                 locale="ja-JP",
                 viewport={"width": 1920, "height": 1080},
-                record_video_dir=f"record/{id}"
+                record_video_dir=dir
             )
             os.makedirs(f"{os.getcwd()}/record", exist_ok=True)
         else:
@@ -79,7 +103,7 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
         page.keyboard.press("Escape")
 
         # Stop video and seek to start
-        page.locator("video").click()
+        page.evaluate("document.querySelector('video')?.click()")
         page.evaluate(f"""
             () => {{
                 const video = document.querySelector('video');
@@ -94,8 +118,8 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
             }
         """)
         buffered = 0
-        ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-        current = 0
+        # ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+        # current = 0
 
         # Buffering
         while buffered < duration:
@@ -114,30 +138,35 @@ def collect_data(url: str, record_browser: bool=False, id: str="") -> dict:
 
             if buffered < old_buffered:
                 brave_proc.kill()
-                raise RuntimeError("Buffering error")
+                xvfb_proc.kill()
+                raise RuntimeError("Buffering progress lost: browser discarded previously buffered data")
 
-            print(f"  {ascii_art[current % len(ascii_art)]} loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r")
-            current += 1
+            print(f"loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r", flush=True)
 
             page.evaluate(f"""
                 () => {{
                     const video = document.querySelector('video');
-                    video.currentTime = {int((buffered - old_buffered) / 4 * 3 + old_buffered)};
+                    video.currentTime = {(buffered - old_buffered)* random.uniform(0.5, 0.95) + old_buffered};
                 }}
             """)
 
-            sleep(1)
+            sleep(random.uniform(0.3, 1.2))
 
-        # Get buffered data
-        tmp_batch = page.evaluate("""
-            () => {
-                const buf = window.__segmentBuffer__ || [];
-                window.__segmentBuffer__ = [];
-                return buf;
-            }
-        """)
+        # Buffering complete
+        print(f"Buffering complete: {int(buffered)} sec                                             ")
 
-        print("Complete                                             ")
-        
+        # ---- JS の __popSegment__() で segment を1件ずつ取得 ----
+        total = page.evaluate("window.__segmentBuffer__?.length || 0")
+        items = []
+        while True:
+            item = page.evaluate("window.__popSegment__()")
+            if item is None:
+                break
+            items.append(item)
+            if len(items) % 10 == 0 or len(items) == total:
+                print(f"collecting segments...  collected: {len(items)} / {total} segments", end="\r", flush=True)
+        print(f"Complete: {len(items)} segments                                             ")
+
     brave_proc.kill()
-    return tmp_batch
+    xvfb_proc.kill()
+    return items
