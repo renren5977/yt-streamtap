@@ -52,6 +52,7 @@ class Processor:
                         seen_init["video"] = True
                         cls = {"track": "video", "data_type": "init", "container_type": "webm", "is_valid": True}
                     else:
+                        print(f"Init fragment detected.")
                         cls = {"track": "video", "data_type": "init", "container_type": "webm", "is_valid": False}
                 elif frag[:4] == b"\x1f\x43\xb6\x75":
                     cls = {"track": "video", "data_type": "cluster", "container_type": "webm", "is_valid": True}
@@ -112,11 +113,9 @@ class Processor:
                 for video_item in video_items[chunk_start:chunk_end]:
                         video_item["ts_start"] = result["ts_start"]
                         video_item["ts_end"] = result["ts_end"]
-                for video_item in video_items[:chunk_start]:
-                    if video_item["data_type"] in ["cluster", "segment"] and video_item["ts_start"] == result["ts_start"]:
-                        for k in range(chunk_start, chunk_end):
-                            video_items[k]["is_valid"] = False
-                            continue
+                for k in range(chunk_start):
+                    if video_items[k]["data_type"] in ["cluster", "segment", "piece"] and video_items[k]["ts_start"] == result["ts_start"]:
+                        video_items[k]["is_valid"] = False
             else:
                 i += 1
 
@@ -140,11 +139,9 @@ class Processor:
                 for audio_item in audio_items[chunk_start:chunk_end]:
                         audio_item["ts_start"] = result["ts_start"]
                         audio_item["ts_end"] = result["ts_end"]
-                for audio_item in audio_items[:chunk_start]:
-                    if audio_item["data_type"] in ["cluster", "segment"] and audio_item["ts_start"] == result["ts_start"]:
-                        for k in range(chunk_start, chunk_end):
-                            audio_items[k]["is_valid"] = False
-                            continue
+                for k in range(chunk_start):
+                    if audio_items[k]["data_type"] in ["cluster", "segment", "piece"] and audio_items[k]["ts_start"] == result["ts_start"]:
+                        audio_items[k]["is_valid"] = False
             else:
                 i += 1
 
