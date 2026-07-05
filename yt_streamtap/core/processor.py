@@ -151,12 +151,11 @@ class Processor:
         self.items = items
 
         for item in items:
-            if item["data_type"] == "segment" and item["is_valid"]:
+            if item["data_type"] in ["segment", "cluster"] and item["is_valid"]:
                 self.built["video"]["type"] = item["container_type"]
                 break
         else:
             raise RuntimeError("No segment found in the batch")
-
 
         # --- built を作成 ---
         video_tmp_chunk = bytes()
@@ -235,7 +234,7 @@ class Processor:
 
 if __name__ == "__main__":
     id = "test"
-    batch = collector.collect_data("https://www.youtube.com/watch?v=fY93kZK5t4I&list=RDfY93kZK5t4I&start_radio=1", id=id)
+    batch = collector.collect_data("https://www.youtube.com/watch?v=aMOEj8aHjn4", id=id)
     proc = Processor(batch)
     proc.get_timeline_log()
 
