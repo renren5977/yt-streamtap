@@ -14,7 +14,6 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
-
 def save_timeline_csv(timeline: list, output_path: str):
     """
     timeline をCSVに保存する。
@@ -64,27 +63,33 @@ def cli():
         help="Don't merge video and audio into a single file"
     )
     parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Log level (default: INFO)"
+        "-d", "--debug",
+        action="store_true",
+        help="Enable debug mode"
     )
     parser.add_argument(
-        "--record-browser",
+        "-rb", "--record-browser",
         action="store_true",
         help="Record browser for debugging"
     )
     parser.add_argument(
         "-r", "--retry-count",
         type=int,
-        default=1,
-        help="Number of retries (default: 1)"
+        default=3,
+        help="Number of retries (default: 3)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9222,
+        help="Port for launching Brave browser (default: 9222)"
     )
     args = parser.parse_args()
 
     # ロギング設定
-    logging.basicConfig(level=getattr(logging, args.log_level))
-
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+        logger.debug("Debug mode enabled")
 
     # ストリームデータ収集
     uid = str(uuid.uuid4())
@@ -102,17 +107,8 @@ def cli():
     while retry_count < args.retry_count:
         try:
             # データ収集・処理
-            try:
-                raw = collector.collect_data(args.url, args.record_browser, dir)
-            except Exception as e:
-                with open(error_log_path, "a", encoding="utf-8") as f:
-                    f.write("=" * 80 + "\n")
-                    f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
-                    traceback.print_exc(file=f)
-                    f.write("\n")
-                raise RuntimeError(f"Failed to collect data.")
-                
-            proc = processor.Processor(raw)
+            raw = collector.collect_data(args.url, args.record_browser, args.port, dir, args.debug)                
+            proc = processor.Processor(raw, dir, args.debug)
             built = proc.built
             csv_log = proc.get_timeline_log()
 
@@ -161,6 +157,11 @@ def cli():
                     break
 
         except Exception as e:
+            with open(error_log_path, "a", encoding="utf-8") as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
+                traceback.print_exc(file=f)
+                f.write("\n")
             print(f"Error: {e}")
             print(f"Retrying in 1 seconds...")
             sleep(1)

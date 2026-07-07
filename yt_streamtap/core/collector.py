@@ -25,14 +25,13 @@ def with_retry(func):
     return wrapper
 
 # @with_retry
-def collect_data(url: str, record_browser: bool=False, dir: str="") -> dict:
+def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str="", debug: bool=False) -> dict:
     """
     Collect data from video and audio stream.
     """
 
-    # Launch brave (headless: Xvfb 不要で安定動作)
     brave_proc = subprocess.Popen(
-        ["/usr/bin/brave-browser", "--remote-debugging-port=9222", "--disable-web-security", "--no-sandbox"],
+        ["/usr/bin/brave-browser", f"--remote-debugging-port={port}", "--disable-web-security", "--no-sandbox"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
@@ -50,7 +49,7 @@ def collect_data(url: str, record_browser: bool=False, dir: str="") -> dict:
         try:
             s = socket.socket()
             s.settimeout(1)
-            s.connect(("127.0.0.1", 9222))
+            s.connect(("127.0.0.1", port))
             s.close()
             break
         except:

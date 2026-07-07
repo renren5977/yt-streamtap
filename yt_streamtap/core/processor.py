@@ -3,6 +3,7 @@ import hashlib
 import logging
 from . import parser, collector
 import csv
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -10,10 +11,12 @@ logger = logging.getLogger(__name__)
 class Processor:
     """キャプチャデータを処理し、items/built/timeline_log を生成する。"""
 
-    def __init__(self, batch: list):
+    def __init__(self, batch: list, dir: str="", debug: bool=False):
         """batch: キャプチャデータのリスト（hook.jsから取得）"""
         self.batch = batch
         self.items = []
+        self.dir = dir
+        self.debug = debug
 
         self.built = {
             "video": 
@@ -89,14 +92,37 @@ class Processor:
             }
             items.append(item)
 
+        # --- もし debug モードなら items を保存 ---
+        if self.debug:
+            video_count = 0
+            audio_count = 0
+            logger.debug(f"Saved {len(items)} items from batch.")
+            os.makedirs(self.dir + "/items/video", exist_ok=True)
+            os.makedirs(self.dir + "/items/audio", exist_ok=True)
+            for item in items:
+                match item["track"]:
+                    case "video":
+                        with open(f"{self.dir}/items/video/{video_count}-{item['data_type']}-{item['hash']}.bin", "wb") as f:
+                            f.write(item["frag"])
+                        video_count += 1
+                    case "audio":
+                        with open(f"{self.dir}/items/audio/{audio_count}-{item['data_type']}-{item['hash']}.bin", "wb") as f:
+                            f.write(item["frag"])
+                        audio_count += 1
+
         # --- item の timescale,duration, ts_start, ts_end を計算 ---
         video_items = [i for i in items if i["track"] == "video"]
         audio_items = [i for i in items if i["track"] == "audio"]
         
         i = 0
+        test_video_init = [i for i in video_items if i["data_type"] == "init"][0]["frag"]
+        test_audio_init = [i for i in audio_items if i["data_type"] == "init"][0]["frag"]
+        test_video_segment = [i for i in video_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
+        test_audio_segment = [i for i in audio_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
+
         while i < len(video_items):
             if video_items[i]["data_type"] == "init":
-                result = parser.get_init_info(video_items[i]["frag"])
+                result = parser.get_init_info(video_items[i]["frag"] + test_video_segment, "video", dir=self.dir)
                 video_items[i]["duration"] = result["duration"]
                 video_items[i]["timescale"] = result["timescale"]
                 i += 1
@@ -109,11 +135,11 @@ class Processor:
                 chunk_frag = bytes()
                 for v in video_items[chunk_start:chunk_end]:
                     chunk_frag += v["frag"]
-                result = parser.get_chunk_info(chunk_frag)
+                result = parser.get_chunk_info(test_video_init + chunk_frag, "video", dir=self.dir)
                 for video_item in video_items[chunk_start:chunk_end]:
                         video_item["ts_start"] = result["ts_start"]
                         video_item["ts_end"] = result["ts_end"]
-                for k in range(chunk_start):
+                for k in range(chunk_start): # 同じ ts_start を持つ古い cluster/segment/piece は無効化する
                     if video_items[k]["data_type"] in ["cluster", "segment", "piece"] and video_items[k]["ts_start"] == result["ts_start"]:
                         video_items[k]["is_valid"] = False
             else:
@@ -122,7 +148,7 @@ class Processor:
         i = 0
         while i < len(audio_items):
             if audio_items[i]["data_type"] == "init":
-                result = parser.get_init_info(audio_items[i]["frag"])
+                result = parser.get_init_info(audio_items[i]["frag"] + test_audio_segment, "audio", dir=self.dir)
                 audio_items[i]["duration"] = result["duration"]
                 audio_items[i]["timescale"] = result["timescale"]
                 i += 1
@@ -135,7 +161,7 @@ class Processor:
                 chunk_frag = bytes()
                 for a in audio_items[chunk_start:chunk_end]:
                     chunk_frag += a["frag"]
-                result = parser.get_chunk_info(chunk_frag)
+                result = parser.get_chunk_info(test_audio_init + chunk_frag, "audio", dir=self.dir)
                 for audio_item in audio_items[chunk_start:chunk_end]:
                         audio_item["ts_start"] = result["ts_start"]
                         audio_item["ts_end"] = result["ts_end"]
