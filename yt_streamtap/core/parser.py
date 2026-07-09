@@ -2,6 +2,7 @@ import subprocess
 import os
 import re
 import json
+from .console import *
 
 def get_init_info(data, track ,dir, debug=False):
     path = os.path.join(dir, "tmp.bin")
@@ -12,38 +13,47 @@ def get_init_info(data, track ,dir, debug=False):
         cmd = [
             "ffprobe",
             "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=duration_ts,time_base,duration",
+            #"-select_streams", "a:0",
+            "-show_streams",
+            "-show_format",
+            "-show_entries", "stream=time_base,",
             "-of", "json",
             path,
         ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(result.stdout)
+        time_base = info["streams"][0]["time_base"]
+        duration = info["format"]["duration"]
+        duration_ts = float(duration) / eval(time_base)
+
     elif track == "video":
         cmd = [
             "ffprobe",
             "-v", "error",
             "-select_streams", "v:0",
+            #"-show_streams",
             "-show_entries", "stream=duration_ts,time_base",
             "-of", "json",
             path,
         ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info = json.loads(result.stdout)
+        time_base = info["streams"][0]["time_base"]
+        duration_ts = info["streams"][0]["duration_ts"]
+
     else:
         raise ValueError(f"Unknown track type: {track}")
-
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    info = json.loads(result.stdout)["streams"][0]
-    print(info)
-    time_base = info["time_base"]
-    duration_ts = info.get("duration_ts")
-    if duration_ts is None:
-        duration_ts = float(info.get("duration", 0)) * eval(time_base)
-
+    
     os.remove(path)
-
-    return {
-        "duration": duration_ts,
-        "timescale": time_base,
+    result = {
+        "time_base": time_base,
+        "duration_ts": duration_ts,
     }
 
+    return result
+    
 def get_chunk_info(data, track, dir, debug=False):
     path = os.path.join(dir, "tmp.bin")
     with open(path, "wb") as f:
@@ -54,8 +64,10 @@ def get_chunk_info(data, track, dir, debug=False):
             "ffprobe",
             "-v", "error",
             "-select_streams", "a:0",
-            "-show_packets",
-            "-show_entries", "packet=pts",
+            #"-show_packets",
+            "-show_format",
+            "-show_frames",
+            #"-show_entries", "packet=pts",
             "-of", "json",
             path,
         ]
@@ -64,20 +76,28 @@ def get_chunk_info(data, track, dir, debug=False):
             "ffprobe",
             "-v", "error",
             "-select_streams", "v:0",
-            "-show_packets",
-            "-show_entries", "packet=pts",
+            "-show_format",
+            "-show_frames",
+            #"-show_packets",
+            #"-show_entries", "packet=pts, duration_ts",
             "-of", "json",
             path,
         ]
+
     else:
         raise ValueError(f"Unknown track type: {track}")
     
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    packets = json.loads(result.stdout)["packets"]
+    frames = json.loads(result.stdout)["frames"]
+    duration = frames[-1].get("duration", 0)
+
+    ts_start = frames[0]["pkt_dts"]
+    ts_end = frames[-1]["pkt_dts"] + duration
+    
+    result = {
+        "ts_start": ts_start,
+        "ts_end": ts_end,
+    }
 
     os.remove(path)
-
-    return {
-        "ts_start": packets[0]["pts"],
-        "ts_end": packets[-1]["pts"],
-    }
+    return result

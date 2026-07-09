@@ -4,9 +4,9 @@ import logging
 from . import parser, collector
 import csv
 import os
-
-logger = logging.getLogger(__name__)
-
+import portion as P
+from .console import *
+import sys
 
 class Processor:
     """キャプチャデータを処理し、items/built/timeline_log を生成する。"""
@@ -55,7 +55,6 @@ class Processor:
                         seen_init["video"] = True
                         cls = {"track": "video", "data_type": "init", "container_type": "webm", "is_valid": True}
                     else:
-                        print(f"Init fragment detected.")
                         cls = {"track": "video", "data_type": "init", "container_type": "webm", "is_valid": False}
                 elif frag[:4] == b"\x1f\x43\xb6\x75":
                     cls = {"track": "video", "data_type": "cluster", "container_type": "webm", "is_valid": True}
@@ -87,8 +86,8 @@ class Processor:
                 "hash": h,
                 "ts_start": -1,
                 "ts_end": -1,
-                "duration": -1,
-                "timescale": -1,
+                "duration_ts": -1,
+                "time_base": -1,
             }
             items.append(item)
 
@@ -96,7 +95,7 @@ class Processor:
         if self.debug:
             video_count = 0
             audio_count = 0
-            logger.debug(f"Saved {len(items)} items from batch.")
+            print(f"{GRAY}Debug: Saved {len(items)} items from batch.{RESET}", file=sys.stderr)
             os.makedirs(self.dir + "/items/video", exist_ok=True)
             os.makedirs(self.dir + "/items/audio", exist_ok=True)
             for item in items:
@@ -110,7 +109,7 @@ class Processor:
                             f.write(item["frag"])
                         audio_count += 1
 
-        # --- item の timescale,duration, ts_start, ts_end を計算 ---
+        # --- item の time_base,duration_ts, ts_start, ts_end を計算 ---
         video_items = [i for i in items if i["track"] == "video"]
         audio_items = [i for i in items if i["track"] == "audio"]
         
@@ -121,10 +120,11 @@ class Processor:
         test_audio_segment = [i for i in audio_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
 
         while i < len(video_items):
+            print(f"{CR}{CLEAR_LINE}Processing item... {i} / {len(video_items) + len(audio_items)}", end="", flush=True, file=sys.stderr)
             if video_items[i]["data_type"] == "init":
                 result = parser.get_init_info(video_items[i]["frag"] + test_video_segment, "video", dir=self.dir)
-                video_items[i]["duration"] = result["duration"]
-                video_items[i]["timescale"] = result["timescale"]
+                video_items[i]["duration_ts"] = result["duration_ts"]
+                video_items[i]["time_base"] = result["time_base"]
                 i += 1
             elif video_items[i]["data_type"] in ["cluster", "segment"]:
                 chunk_start = i
@@ -147,10 +147,11 @@ class Processor:
 
         i = 0
         while i < len(audio_items):
+            print(f"{CR}{CLEAR_LINE}Processing item... {len(video_items) + i} / {len(video_items) + len(audio_items)}", end="", flush=True, file=sys.stderr)
             if audio_items[i]["data_type"] == "init":
                 result = parser.get_init_info(audio_items[i]["frag"] + test_audio_segment, "audio", dir=self.dir)
-                audio_items[i]["duration"] = result["duration"]
-                audio_items[i]["timescale"] = result["timescale"]
+                audio_items[i]["duration_ts"] = result["duration_ts"]
+                audio_items[i]["time_base"] = result["time_base"]
                 i += 1
             elif audio_items[i]["data_type"] in ["cluster", "segment"]:
                 chunk_start = i
@@ -176,14 +177,87 @@ class Processor:
         items.extend(audio_items)
         self.items = items
 
+        print(f"{CR}{CLEAR_LINE}{GREEN}✓ Processing complete: {len(video_items) + len(audio_items)} items", flush=True, file=sys.stderr)
+
+        # --- video の データ欠損をチェック ---
+        video_duration_ts = sorted(
+            [
+                item
+                for item in items
+                if item["is_valid"]
+                and item["data_type"] == "init"
+                and item["track"] == "video"
+            ],
+            key=lambda x: x["duration_ts"]
+        )[-1]["duration_ts"]
+
+        video_start_ts = sorted(
+            [
+                item
+                for item in items
+                if item["is_valid"]
+                and item["data_type"] in ["cluster", "segment", "piece"] 
+                and item["track"] == "video"
+            ],
+            key=lambda x: x["ts_start"]
+        )[0]["ts_start"]
+        
+        video_p = P.closed(video_start_ts, video_start_ts + video_duration_ts)
+        
+        for item in items:
+            if item["data_type"] in ["cluster", "segment"] and item["track"] == "video" and item["is_valid"]:
+                video_p = video_p - P.closed(item["ts_start"], item["ts_end"])
+
+        # ---audio の データ欠損をチェック ---
+        audio_duration_ts = sorted(
+            [
+                item
+                for item in items
+                if item["is_valid"]
+                and item["data_type"] == "init"
+                and item["track"] == "audio"
+            ],
+            key=lambda x: x["duration_ts"]
+        )[-1]["duration_ts"]
+
+        audio_start_ts = sorted(
+            [
+                item
+                for item in items
+                if item["is_valid"]
+                and item["data_type"] in ["cluster", "segment", "piece"] 
+                and item["track"] == "audio"
+            ],
+            key=lambda x: x["ts_start"]
+        )[0]["ts_start"]
+
+        audio_p = P.closed(audio_start_ts, audio_start_ts + audio_duration_ts)
+        
+        for item in items:
+            if item["data_type"] in ["cluster", "segment"] and item["track"] == "audio" and item["is_valid"]:
+                audio_p = audio_p - P.closed(item["ts_start"], item["ts_end"])
+
+        total_ticks = 0
+        for t in video_p:
+            total_ticks += int(t.upper - t.lower)
+
+        for t in audio_p:
+            total_ticks += int(t.upper - t.lower)
+                
+        if total_ticks > 0:
+            print(
+                f"{YELLOW}Warning: {total_ticks} ticks of missing video data were detected. Playback may not work correctly.{RESET}",
+                file=sys.stderr
+            )
+
+        # --- built を作成 ---
         for item in items:
             if item["data_type"] in ["segment", "cluster"] and item["is_valid"]:
                 self.built["video"]["type"] = item["container_type"]
                 break
         else:
             raise RuntimeError("No segment found in the batch")
-
-        # --- built を作成 ---
+    
         video_tmp_chunk = bytes()
         audio_tmp_chunk = bytes()
 
@@ -234,8 +308,8 @@ class Processor:
             "hash", 
             "ts_start", 
             "ts_end", 
-            "duration", 
-            "timescale"
+            "duration_ts", 
+            "time_base"
         ]]
 
         for item in self.items:
@@ -252,8 +326,8 @@ class Processor:
                 item["hash"],
                 item["ts_start"],
                 item["ts_end"],
-                item["duration"],
-                item["timescale"],
+                item["duration_ts"],
+                item["time_base"],
             ])
 
         return log

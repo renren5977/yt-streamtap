@@ -7,12 +7,11 @@ import re
 import uuid
 from time import sleep
 import portion as P
-import logging
 import argparse
 from .core import collector, processor
+from .core.console import *
 import traceback
-
-logger = logging.getLogger(__name__)
+import sys
 
 def save_timeline_csv(timeline: list, output_path: str):
     """
@@ -67,16 +66,16 @@ def cli():
         action="store_true",
         help="Enable debug mode"
     )
-    parser.add_argument(
-        "-rb", "--record-browser",
-        action="store_true",
-        help="Record browser for debugging"
-    )
+    # parser.add_argument(
+    #     "-rb", "--record-browser",
+    #     action="store_true",
+    #     help="Record browser for debugging"
+    # )
     parser.add_argument(
         "-r", "--retry-count",
         type=int,
-        default=3,
-        help="Number of retries (default: 3)"
+        default=0,
+        help="Number of retries (default: 0)"
     )
     parser.add_argument(
         "--port",
@@ -86,28 +85,23 @@ def cli():
     )
     args = parser.parse_args()
 
-    # ロギング設定
-    if args.debug:
-        logging.basicConfig(level=logging.DEBUG)
-        logger.debug("Debug mode enabled")
-
     # ストリームデータ収集
     uid = str(uuid.uuid4())
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     id = f"{timestamp}{uid}"
     dir = f"{args.output_dir}/{id}"
-    print(f"Output directory: {dir}")
+    print(f"Output directory: {dir}", file=sys.stderr)
     os.makedirs(dir, exist_ok=True)
     error_log_path = os.path.join(dir, "error.log")
 
-    if args.record_browser:
-        print(f"Recording browser... ")
+    if args.debug:
+        print(f"{GRAY}Debug: Recording browser...{RESET}", file=sys.stderr)
 
     retry_count = 0
-    while retry_count < args.retry_count:
+    while True:
         try:
             # データ収集・処理
-            raw = collector.collect_data(args.url, args.record_browser, args.port, dir, args.debug)                
+            raw = collector.collect_data(args.url, args.port, dir, args.debug)                
             proc = processor.Processor(raw, dir, args.debug)
             built = proc.built
             csv_log = proc.get_timeline_log()
@@ -135,7 +129,6 @@ def cli():
                 f.write(built["audio"]["init"] + b"".join(built["audio"]["chunks"]))
 
             if not args.no_merge:
-                print("merging video and audio...")
                 mkvmerge_cmd = [
                     "/usr/bin/mkvmerge",
                     "-o", output_path,
@@ -143,7 +136,7 @@ def cli():
                     audio_path
                 ]
 
-                print("command:", " ".join(mkvmerge_cmd))
+                # print("command:", " ".join(mkvmerge_cmd))
 
                 proc = subprocess.run(
                     mkvmerge_cmd,
@@ -153,7 +146,7 @@ def cli():
                 if proc.returncode != 0:
                     raise RuntimeError(f"Failed to merge video and audio.")
                 else:
-                    print(f"Successed")
+                    print(f"{GREEN}Successed{RESET}", file=sys.stderr)
                     break
 
         except Exception as e:
@@ -162,13 +155,12 @@ def cli():
                 f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
                 traceback.print_exc(file=f)
                 f.write("\n")
-            print(f"Error: {e}")
-            print(f"Retrying in 1 seconds...")
-            sleep(1)
+            print(f"{RED}Critical: {type(e).__name__}｜{e}{RESET}", file=sys.stderr)
+            if retry_count == args.retry_count:
+                print(f"Failed after {retry_count} retries. Exiting.", file=sys.stderr)
+                return 1
+            print(f"Retrying... {retry_count + 1}/{args.retry_count}", file=sys.stderr)
             retry_count += 1
-    else:
-        print(f"Failed after {retry_count} retries. Exiting.")
-        return 1
     
     return 0
 

@@ -6,26 +6,25 @@ from time import sleep, time
 import re
 import json
 from playwright.sync_api import sync_playwright
-import logging
+import sys
+from .console import *
 
-logger = logging.getLogger(__name__)
-
-def with_retry(func):
-    def wrapper(*args, **kwargs):
-        last_exception = None
-        for _ in range(3):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                print(f"buffering error: {e}")
-                os.system("kill -9 $(lsof -t -i:9222) 2>/dev/null; kill -9 $(lsof -t -i:9223) 2>/dev/null")
-                print("Retrying...")
-                last_exception = e
-        raise last_exception
-    return wrapper
+# def with_retry(func):
+#     def wrapper(*args, **kwargs):
+#         last_exception = None
+#         for _ in range(3):
+#             try:
+#                 return func(*args, **kwargs)
+#             except Exception as e:
+#                 print(f"buffering error: {e}")
+#                 os.system("kill -9 $(lsof -t -i:9222) 2>/dev/null; kill -9 $(lsof -t -i:9223) 2>/dev/null")
+#                 print("Retrying...")
+#                 last_exception = e
+#         raise last_exception
+#     return wrapper
 
 # @with_retry
-def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str="", debug: bool=False) -> dict:
+def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> dict:
     """
     Collect data from video and audio stream.
     """
@@ -59,7 +58,7 @@ def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str=
     with sync_playwright() as pw:
 
         browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
-        if record_browser:
+        if debug:
             context = browser.new_context(
                 locale="ja-JP",
                 viewport={"width": 1920, "height": 1080},
@@ -84,6 +83,13 @@ def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str=
         # If quality > 720p, switch to best quality (Auto caps at 720p)
         page.locator("video").hover()
 
+        duration = page.evaluate("""
+            () => {
+                const video = document.querySelector('video');
+                return video.duration;
+            }
+        """)
+
         page.locator(".ytp-settings-button").click()
         page.get_by_text("画質", exact=True).click()
 
@@ -92,14 +98,26 @@ def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str=
         ).nth(0)
         quality = re.findall(r"\d+", quality_item.inner_text())[0]
 
-        print(f"quality: {quality}")
-
         if int(quality) >= 1080:
 
             page.evaluate("() => {window.__clearBufferRequested__ = true;}")
             quality_item.click()
 
         page.keyboard.press("Escape")
+
+        def get_youtube_video_title(page) -> str:
+            title_locator = page.locator(
+                "h1.ytd-watch-metadata yt-formatted-string"
+            )
+            title_locator.wait_for(state="visible", timeout=10000)
+            title = title_locator.inner_text().strip()
+            if not title:
+                raise RuntimeError("Failed to get YouTube video title.")
+            return title
+        
+        title = get_youtube_video_title(page)
+        print(f"Title: {title}", file=sys.stderr)
+        print(f"Quality: {quality}", file=sys.stderr)
 
         # Stop video and seek to start
         page.evaluate("document.querySelector('video')?.click()")
@@ -110,18 +128,14 @@ def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str=
             }}
         """)
 
-        duration = page.evaluate("""
-            () => {
-                const video = document.querySelector('video');
-                return video.duration;
-            }
-        """)
         buffered = 0
+        saved = 0
+        items = []
         # ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
         # current = 0
 
         # Buffering
-        while buffered < duration:
+        while buffered < duration or buffered == 0: # なぜか、0秒でロード完了してしまうことがあるので、0秒より大きくなるまで待つ。
             old_buffered = buffered
             buffered = page.evaluate("""
                 () => {
@@ -135,36 +149,48 @@ def collect_data(url: str, record_browser: bool=False, port: int=9222, dir: str=
                 }
             """)
 
-            if buffered < old_buffered:
-                brave_proc.kill()
-                xvfb_proc.kill()
-                raise RuntimeError("Buffering progress lost: browser discarded previously buffered data")
-
-            print(f"loading...  buffered: {int(buffered)} / {int(duration)} sec", end="\r", flush=True)
-
-            page.evaluate(f"""
-                () => {{
+            seek = page.evaluate("""
+                () => {
                     const video = document.querySelector('video');
-                    video.currentTime = {(buffered - old_buffered)* random.uniform(0.5, 0.95) + old_buffered};
-                }}
+                    return video.currentTime;
+                }
             """)
 
-            sleep(random.uniform(0.3, 1.2))
+            if buffered < old_buffered:
+                class PlayerError(Exception):
+                    def __init__(self, message):
+                        self.message = message
+                brave_proc.kill()
+                xvfb_proc.kill()
+                print(f"{CR}{CLEAR_LINE}{RED}✗ Failed: loading error{RESET}", file=sys.stderr)
+                raise PlayerError("Buffering error")
 
-        # Buffering complete
-        print(f"Buffering complete: {int(buffered)} sec                                             ")
+            if buffered - seek > random.uniform(4, 10):
+                # random seek
+                page.evaluate(f"""
+                    () => {{
+                        const video = document.querySelector('video');
+                        video.currentTime = {seek + (buffered - seek) * random.uniform(0.6, 0.9)};
+                    }}
+                """)
 
-        # ---- JS の __popSegment__() で segment を1件ずつ取得 ----
-        total = page.evaluate("window.__segmentBuffer__?.length || 0")
-        items = []
-        while True:
-            item = page.evaluate("window.__popSegment__()")
-            if item is None:
-                break
-            items.append(item)
-            if len(items) % 10 == 0 or len(items) == total:
-                print(f"collecting segments...  collected: {len(items)} / {total} segments", end="\r", flush=True)
-        print(f"Complete: {len(items)} segments                                             ")
+            if buffered - saved >= 10:
+                while True:
+                    item = page.evaluate("window.__popSegment__()")
+                    if item is None:
+                        break
+                    items.append(item)
+                
+            print(
+                f"{CR}{CLEAR_LINE}Loading buffer and collecting data...  loaded: {int(buffered)} / {int(duration)} sec｜collected: {len(items)} items", 
+                end="", 
+                flush=True,
+                file=sys.stderr
+            )   
+
+            sleep(random.uniform(0.9, 1.5))
+
+        print(f"{CR}{CLEAR_LINE}{GREEN}✓ Completed: loaded: {int(buffered)} sec｜collected: {len(items)} items{RESET}", file=sys.stderr)
 
     brave_proc.kill()
     xvfb_proc.kill()
