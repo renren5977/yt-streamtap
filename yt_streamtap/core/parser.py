@@ -32,16 +32,20 @@ def get_init_info(data, track ,dir, debug=False):
             "ffprobe",
             "-v", "error",
             "-select_streams", "v:0",
-            #"-show_streams",
             "-show_entries", "stream=duration_ts,time_base",
+            "-show_format",
             "-of", "json",
             path,
         ]
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         info = json.loads(result.stdout)
         time_base = info["streams"][0]["time_base"]
-        duration_ts = info["streams"][0]["duration_ts"]
+        # duration_ts は fMP4 / 一部WebM で欠落することがある
+        duration_ts = info["streams"][0].get("duration_ts")
+        if duration_ts is None:
+            num, den = time_base.split("/")
+            duration_ts = float(info["format"]["duration"]) * float(den) / float(num)
 
     else:
         raise ValueError(f"Unknown track type: {track}")
@@ -89,11 +93,14 @@ def get_chunk_info(data, track, dir, debug=False):
     
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     frames = json.loads(result.stdout)["frames"]
-    duration = frames[-1].get("duration", 0)
+    try:
+        duration = frames[-1].get("duration", 0)
+    except IndexError:
+        duration = 0
 
     ts_start = frames[0]["pkt_dts"]
     ts_end = frames[-1]["pkt_dts"] + duration
-    
+
     result = {
         "ts_start": ts_start,
         "ts_end": ts_end,

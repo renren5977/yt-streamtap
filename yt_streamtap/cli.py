@@ -101,9 +101,9 @@ def cli():
     while True:
         try:
             # データ収集・処理
-            raw = collector.collect_data(args.url, args.port, dir, args.debug)                
-            proc = processor.Processor(raw, dir, args.debug)
-            built = proc.built
+            batches = collector.collect_data(args.url, args.port, dir, args.debug)
+            proc = processor.Processor(batches, dir, args.debug)
+            artifacts = proc.artifacts
             csv_log = proc.get_timeline_log()
 
             # CSV保存 (cli.py 側で行う)
@@ -113,20 +113,28 @@ def cli():
                 writer.writerows(csv_log)
 
             # 動画/音声ファイル保存
-            if built["video"]["type"] == "fmp4":
+            if artifacts["video"]["type"] == "fmp4":
                 video_path = os.path.join(dir, f"video.mp4")
-            elif built["video"]["type"] == "webm":
+            elif artifacts["video"]["type"] == "webm":
                 video_path = os.path.join(dir, f"video.webm")
             else:
-                raise ValueError(f"Unknown video type: {built['video']['type']}")
+                raise ValueError(f"Unknown video type: {artifacts['video']['type']}")
             audio_path = os.path.join(dir, f"audio.mp4")
             output_path = os.path.join(dir, f"output.mkv")
 
             with open(video_path, "wb") as f:
-                f.write(built["video"]["init"] + b"".join(built["video"]["chunks"]))
+                f.write(artifacts["video"]["init"])
+
+            for i in artifacts["video"]["chunks"]:
+                with open(video_path, "ab") as f:
+                    f.write(i)
 
             with open(audio_path, "wb") as f:
-                f.write(built["audio"]["init"] + b"".join(built["audio"]["chunks"]))
+                f.write(artifacts["audio"]["init"])
+
+            for i in artifacts["audio"]["chunks"]:
+                with open(audio_path, "ab") as f:
+                    f.write(i)
 
             if not args.no_merge:
                 mkvmerge_cmd = [
@@ -150,6 +158,9 @@ def cli():
                     break
 
         except Exception as e:
+            os.system(f"kill -9 $(lsof -t -i:{args.port}) 2>/dev/null")
+            os.system("pkill -9 Xvfb 2>/dev/null")
+            os.system(f"rm -f /tmp/.X{args.port}-lock /tmp/.X11-unix/X{args.port} 2>/dev/null")
             with open(error_log_path, "a", encoding="utf-8") as f:
                 f.write("=" * 80 + "\n")
                 f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
@@ -158,6 +169,7 @@ def cli():
             print(f"{RED}Critical: {type(e).__name__}｜{e}{RESET}", file=sys.stderr)
             if retry_count == args.retry_count:
                 print(f"Failed after {retry_count} retries. Exiting.", file=sys.stderr)
+                print(f"Error log: {error_log_path}", file=sys.stderr)
                 return 1
             print(f"Retrying... {retry_count + 1}/{args.retry_count}", file=sys.stderr)
             retry_count += 1

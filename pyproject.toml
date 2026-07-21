@@ -5,6 +5,8 @@ description = "yt stream tool"
 dependencies = [
     "playwright",
     "portion",
+    "diskcache",
+    "sqlite-utils",
 ]
 
 [tool.setuptools.packages.find]

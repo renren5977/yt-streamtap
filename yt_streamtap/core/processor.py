@@ -7,36 +7,49 @@ import os
 import portion as P
 from .console import *
 import sys
+from sqlite_utils import Database
+import json
+import uuid as ud
+from swapcollection import SwapDict, SwapList
 
 class Processor:
-    """キャプチャデータを処理し、items/built/timeline_log を生成する。"""
+    """キャプチャデータを加工する。"""
 
-    def __init__(self, batch: list, dir: str="", debug: bool=False):
+    def __init__(self, batches ,dir: str="", debug: bool=False):
         """batch: キャプチャデータのリスト（hook.jsから取得）"""
-        self.batch = batch
-        self.items = []
+        self.db = Database(f"{dir}/db.db")
         self.dir = dir
+        self.batches = batches
         self.debug = debug
 
-        self.built = {
+        self.artifacts = SwapDict({
             "video": 
-                {"init": None, "chunks": [], "type": None},
+                {
+                    "init": None, 
+                    "chunks": SwapList(),
+                    "type": None
+                },
             "audio": 
-                {"init": None, "chunks": [], "type": "webm"},
-        }
+                {
+                    "init": None, 
+                    "chunks": SwapList(),
+                    "type": "webm"
+                },
+        })
 
         self._process()
 
     def _process(self):
         seen_init = {"audio": False, "video": False}
-        items = []
 
         # --- batch の中身を分類 ---
-        for v in self.batch:
-            frag = base64.b64decode(v["data"])
-            video_time = v.get("videoTime", -1)
-            seq = v.get("seq", 0)
-            track_raw = v["track"]
+        items = SwapList()
+        for batch in self.batches:
+            batch = json.loads(batch)
+            frag = base64.b64decode(batch["data"])
+            video_time = batch.get("videoTime", -1)
+            seq = batch.get("seq", 0)
+            track_raw = batch["track"]
 
             if track_raw.startswith("audio"):
                 if frag[24:28] == b"webm":
@@ -71,7 +84,7 @@ class Processor:
             else:
                 cls = {"track": track_raw, "data_type": "unknown", "container_type": "unknown", "is_valid": False}
 
-            h = hashlib.sha256(frag).hexdigest()[:16]
+            h = hashlib.sha256(frag).hexdigest()
 
             item = {
                 "seq": seq,
@@ -110,11 +123,10 @@ class Processor:
                         audio_count += 1
 
         # --- item の time_base,duration_ts, ts_start, ts_end を計算 ---
-        video_items = [i for i in items if i["track"] == "video"]
-        audio_items = [i for i in items if i["track"] == "audio"]
+        video_items = SwapList([i for i in items if i["track"] == "video"])
+        audio_items = SwapList([i for i in items if i["track"] == "audio"])
         
-        i = 0
-        test_video_init = [i for i in video_items if i["data_type"] == "init"][0]["frag"]
+        test_video_init = [i for i in audio_items if i["data_type"] == "init"][0]["frag"]
         test_audio_init = [i for i in audio_items if i["data_type"] == "init"][0]["frag"]
         test_video_segment = [i for i in video_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
         test_audio_segment = [i for i in audio_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
@@ -172,7 +184,7 @@ class Processor:
             else:
                 i += 1
 
-        items = list()
+        items = SwapList()
         items.extend(video_items)
         items.extend(audio_items)
         self.items = items
@@ -250,10 +262,10 @@ class Processor:
                 file=sys.stderr
             )
 
-        # --- built を作成 ---
+        # --- artifact を作成 ---
         for item in items:
             if item["data_type"] in ["segment", "cluster"] and item["is_valid"]:
-                self.built["video"]["type"] = item["container_type"]
+                self.artifacts["video"]["type"] = item["container_type"]
                 break
         else:
             raise RuntimeError("No segment found in the batch")
@@ -265,29 +277,29 @@ class Processor:
             if item["is_valid"]:
                 if item["track"] == "video":
                     if item["data_type"] == "init":
-                        self.built["video"]["init"] = item["frag"]
+                        self.artifacts["video"]["init"] = item["frag"]
                     elif item["data_type"] in ["cluster", "segment"]:
                         if video_tmp_chunk:
-                            self.built["video"]["chunks"].append(video_tmp_chunk)
+                            self.artifacts["video"]["chunks"].append(item["frag"])
                             video_tmp_chunk = bytes()
                         video_tmp_chunk += item["frag"]
                     elif item["data_type"] == "piece":
                         video_tmp_chunk += item["frag"]
                 elif item["track"] == "audio":
                     if item["data_type"] == "init":
-                        self.built["audio"]["init"] = item["frag"]
+                        self.artifacts["audio"]["init"] = item["frag"]
                     elif item["data_type"] in ["cluster", "segment"]:
-                        if audio_tmp_chunk:
-                            self.built["audio"]["chunks"].append(audio_tmp_chunk)
+                        if audio_tmp_chunk:                            
+                            self.artifacts["audio"]["chunks"].append(item["frag"])
                             audio_tmp_chunk = bytes()
                         audio_tmp_chunk += item["frag"]
                     elif item["data_type"] == "piece":
                         audio_tmp_chunk += item["frag"]
 
         if video_tmp_chunk:
-            self.built["video"]["chunks"].append(video_tmp_chunk)
+            self.artifacts["video"]["chunks"].append(video_tmp_chunk)
         if audio_tmp_chunk:
-            self.built["audio"]["chunks"].append(audio_tmp_chunk)
+            self.artifacts["audio"]["chunks"].append(audio_tmp_chunk)
 
     def get_items(self) -> list:
         """個別のappendBufferデータ（タイムスタンプ/種別/valid情報付き）を返す。"""

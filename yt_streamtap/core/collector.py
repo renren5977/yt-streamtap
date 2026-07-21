@@ -2,76 +2,128 @@ import subprocess
 import os
 import socket
 import random
+import select
 from time import sleep, time
 import re
 import json
 from playwright.sync_api import sync_playwright
 import sys
 from .console import *
+from sqlite_utils import Database
+import uuid as ud
+from swapcollection import SwapDict, SwapList
 
-# def with_retry(func):
-#     def wrapper(*args, **kwargs):
-#         last_exception = None
-#         for _ in range(3):
-#             try:
-#                 return func(*args, **kwargs)
-#             except Exception as e:
-#                 print(f"buffering error: {e}")
-#                 os.system("kill -9 $(lsof -t -i:9222) 2>/dev/null; kill -9 $(lsof -t -i:9223) 2>/dev/null")
-#                 print("Retrying...")
-#                 last_exception = e
-#         raise last_exception
-#     return wrapper
 
-# @with_retry
 def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> dict:
     """
     Collect data from video and audio stream.
     """
 
-    brave_proc = subprocess.Popen(
-        ["/usr/bin/brave-browser", f"--remote-debugging-port={port}", "--disable-web-security", "--no-sandbox"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    # ポート使用中チェック
+    with socket.socket() as sock:
+        if sock.connect_ex(("127.0.0.1", port)) == 0:
+            raise RuntimeError(f"Port {port} is already in use")
 
+    display = f":{port}"
+
+    # ディスプレイ使用中チェック
+    display_num = display.lstrip(":")
+    if os.path.exists(f"/tmp/.X11-unix/X{display_num}"):
+        raise RuntimeError(f"Display {display} is already in use")
+
+    # Xvfb 起動
+    print(f"Launching Xvfb (display={display})...", end="", file=sys.stderr)
     xvfb_proc = subprocess.Popen(
-        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        ["Xvfb", display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-ac"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
     )
 
-    os.environ["DISPLAY"] = ":99"
+    sleep(1)
+    if xvfb_proc.poll() is not None:
+        out, err = xvfb_proc.communicate(timeout=3)
+        msg = f"Failed to start Xvfb (display={display})"
+        if err:
+            msg += f"\n  stderr: {err.decode('utf-8', errors='replace')[:500]}"
+        if out:
+            msg += f"\n  stdout: {out.decode('utf-8', errors='replace')[:500]}"
+        raise RuntimeError(msg)
 
-    # Wait for Brave's debugging port to be ready
-    for _ in range(30):
+    print(f"{CR}{CLEAR_LINE}{GREEN}✓ Completed: Xvfb {display} ready{RESET}", file=sys.stderr)
+
+    os.environ["DISPLAY"] = display
+
+    # Brave 起動
+    print(f"Launching Brave (port={port})... waiting", end="", file=sys.stderr)
+    brave_proc = subprocess.Popen(
+        [
+            "/usr/bin/brave-browser",
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={dir}/brave",
+            "--no-sandbox",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=os.environ
+    )
+
+    # Brave のデバッグポートが利用可能になるまで待つ（秒数カウント付き）
+    timeout = 30
+    start = time()
+    connected = False
+    while time() - start < timeout:
+        # パイプバッファ掃除（データがあるときだけ非ブロッキングで読む）
+        if brave_proc.stdout and select.select([brave_proc.stdout], [], [], 0)[0]:
+            try:
+                brave_proc.stdout.read(65536)
+            except:
+                pass
         try:
-            s = socket.socket()
-            s.settimeout(1)
-            s.connect(("127.0.0.1", port))
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
             s.close()
+            connected = True
             break
-        except:
+        except (ConnectionRefusedError, OSError):
+            elapsed = int(time() - start)
+            print(
+                f"{CR}{CLEAR_LINE}Waiting for Brave CDP port {port}... {elapsed}s",
+                end="", flush=True, file=sys.stderr
+            )
             sleep(0.5)
+
+    if not connected:
+        brave_proc.kill()
+        xvfb_proc.kill()
+        out = b""
+        try:
+            if brave_proc.stdout:
+                out = brave_proc.stdout.read(10000)
+        except:
+            pass
+        msg = f"Brave CDP port {port} not ready after {timeout}s"
+        if out:
+            msg += f"\n  output: {out.decode('utf-8', errors='replace')[:1000]}"
+        raise RuntimeError(msg)
+
+    print(f"{CR}{CLEAR_LINE}{GREEN}✓ Brave CDP port {port} ready{RESET}", file=sys.stderr)
 
     # Connect to brave
     with sync_playwright() as pw:
 
-        browser = pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         if debug:
             context = browser.new_context(
                 locale="ja-JP",
                 viewport={"width": 1920, "height": 1080},
                 record_video_dir=dir
             )
-            os.makedirs(f"{os.getcwd()}/record", exist_ok=True)
         else:
             context = browser.new_context(
                 locale="ja-JP",
                 viewport={"width": 1920, "height": 1080}
             )
 
-        context.set_default_timeout(5000)
+        context.set_default_timeout(10000)
         page = context.new_page()
 
         # JSinjection
@@ -114,7 +166,7 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
             if not title:
                 raise RuntimeError("Failed to get YouTube video title.")
             return title
-        
+
         title = get_youtube_video_title(page)
         print(f"Title: {title}", file=sys.stderr)
         print(f"Quality: {quality}", file=sys.stderr)
@@ -130,13 +182,13 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
 
         buffered = 0
         saved = 0
-        items = []
-        # ascii_art = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-        # current = 0
 
-        # Buffering
+        batches = SwapList()
+
         while buffered < duration or buffered == 0: # なぜか、0秒でロード完了してしまうことがあるので、0秒より大きくなるまで待つ。
             old_buffered = buffered
+
+            # 現在のバッファ取得済み時間を取得
             buffered = page.evaluate("""
                 () => {
                     const video = document.querySelector('video');
@@ -149,6 +201,7 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
                 }
             """)
 
+            # 現在のビデオの再生位置を取得
             seek = page.evaluate("""
                 () => {
                     const video = document.querySelector('video');
@@ -165,33 +218,33 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
                 print(f"{CR}{CLEAR_LINE}{RED}✗ Failed: loading error{RESET}", file=sys.stderr)
                 raise PlayerError("Buffering error")
 
-            if buffered - seek > random.uniform(4, 10):
+            if buffered - seek > random.uniform(10, 20):
                 # random seek
                 page.evaluate(f"""
                     () => {{
                         const video = document.querySelector('video');
-                        video.currentTime = {seek + (buffered - seek) * random.uniform(0.6, 0.9)};
+                        video.currentTime = {seek + (buffered - seek) * random.uniform(0.7, 0.9)};
                     }}
                 """)
 
             if buffered - saved >= 10:
                 while True:
-                    item = page.evaluate("window.__popSegment__()")
-                    if item is None:
+                    batch = page.evaluate("window.__popSegment__()")
+                    if batch is None:
                         break
-                    items.append(item)
-                
+                    batches.append(batch)
+
             print(
-                f"{CR}{CLEAR_LINE}Loading buffer and collecting data...  loaded: {int(buffered)} / {int(duration)} sec｜collected: {len(items)} items", 
-                end="", 
+                f"{CR}{CLEAR_LINE}Loading buffer and collecting data...  loaded: {int(buffered)} / {int(duration)} sec｜collected: {len(batches)} items",
+                end="",
                 flush=True,
                 file=sys.stderr
-            )   
+            )
 
-            sleep(random.uniform(0.9, 1.5))
+            sleep(random.uniform(1.2, 2))
 
-        print(f"{CR}{CLEAR_LINE}{GREEN}✓ Completed: loaded: {int(buffered)} sec｜collected: {len(items)} items{RESET}", file=sys.stderr)
+        print(f"{CR}{CLEAR_LINE}{GREEN}✓ Completed: loaded: {int(buffered)} sec｜collected: {len(batches)} items{RESET}", file=sys.stderr)
 
     brave_proc.kill()
     xvfb_proc.kill()
-    return items
+    return batches
