@@ -45,7 +45,6 @@ class Processor:
         # --- batch の中身を分類 ---
         items = SwapList()
         for batch in self.batches:
-            batch = json.loads(batch)
             frag = base64.b64decode(batch["data"])
             video_time = batch.get("videoTime", -1)
             seq = batch.get("seq", 0)
@@ -126,11 +125,12 @@ class Processor:
         video_items = SwapList([i for i in items if i["track"] == "video"])
         audio_items = SwapList([i for i in items if i["track"] == "audio"])
         
-        test_video_init = [i for i in audio_items if i["data_type"] == "init"][0]["frag"]
+        test_video_init = [i for i in video_items if i["data_type"] == "init"][0]["frag"]
         test_audio_init = [i for i in audio_items if i["data_type"] == "init"][0]["frag"]
         test_video_segment = [i for i in video_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
         test_audio_segment = [i for i in audio_items if i["data_type"] in ["cluster", "segment"]][0]["frag"]
 
+        i = 0
         while i < len(video_items):
             print(f"{CR}{CLEAR_LINE}Processing item... {i} / {len(video_items) + len(audio_items)}", end="", flush=True, file=sys.stderr)
             if video_items[i]["data_type"] == "init":
@@ -189,7 +189,7 @@ class Processor:
         items.extend(audio_items)
         self.items = items
 
-        print(f"{CR}{CLEAR_LINE}{GREEN}✓ Processing complete: {len(video_items) + len(audio_items)} items", flush=True, file=sys.stderr)
+        print(f"{CR}{CLEAR_LINE}{GREEN}Completed: Processed {len(video_items) + len(audio_items)} items", flush=True, file=sys.stderr)
 
         # --- video の データ欠損をチェック ---
         video_duration_ts = sorted(
@@ -280,19 +280,17 @@ class Processor:
                         self.artifacts["video"]["init"] = item["frag"]
                     elif item["data_type"] in ["cluster", "segment"]:
                         if video_tmp_chunk:
-                            self.artifacts["video"]["chunks"].append(item["frag"])
-                            video_tmp_chunk = bytes()
-                        video_tmp_chunk += item["frag"]
+                            self.artifacts["video"]["chunks"].append(video_tmp_chunk)
+                        video_tmp_chunk = item["frag"]
                     elif item["data_type"] == "piece":
                         video_tmp_chunk += item["frag"]
                 elif item["track"] == "audio":
                     if item["data_type"] == "init":
                         self.artifacts["audio"]["init"] = item["frag"]
                     elif item["data_type"] in ["cluster", "segment"]:
-                        if audio_tmp_chunk:                            
-                            self.artifacts["audio"]["chunks"].append(item["frag"])
-                            audio_tmp_chunk = bytes()
-                        audio_tmp_chunk += item["frag"]
+                        if audio_tmp_chunk:
+                            self.artifacts["audio"]["chunks"].append(audio_tmp_chunk)
+                        audio_tmp_chunk = item["frag"]
                     elif item["data_type"] == "piece":
                         audio_tmp_chunk += item["frag"]
 

@@ -43,6 +43,13 @@ def save_timeline_csv(timeline: list, output_path: str):
             ])
 
 
+def _cleanup(port: int):
+    """Brave/Xvfb を強制終了し、X のロックファイルを削除する。"""
+    os.system(f"kill -9 $(lsof -t -i:{port}) 2>/dev/null")
+    os.system("pkill -9 Xvfb 2>/dev/null")
+    os.system(f"rm -f /tmp/.X{port}-lock /tmp/.X11-unix/X{port} 2>/dev/null")
+
+
 def cli():
     parser = argparse.ArgumentParser(
         description="yt-streamtap is a command-line tool for downloading videos and other media streams from websites automatically."
@@ -144,8 +151,6 @@ def cli():
                     audio_path
                 ]
 
-                # print("command:", " ".join(mkvmerge_cmd))
-
                 proc = subprocess.run(
                     mkvmerge_cmd,
                     stdout=subprocess.DEVNULL,
@@ -154,13 +159,10 @@ def cli():
                 if proc.returncode != 0:
                     raise RuntimeError(f"Failed to merge video and audio.")
                 else:
-                    print(f"{GREEN}Successed{RESET}", file=sys.stderr)
+                    print(f"{GREEN}Successed: file saved {output_path}{RESET}", file=sys.stderr)
                     break
 
         except Exception as e:
-            os.system(f"kill -9 $(lsof -t -i:{args.port}) 2>/dev/null")
-            os.system("pkill -9 Xvfb 2>/dev/null")
-            os.system(f"rm -f /tmp/.X{args.port}-lock /tmp/.X11-unix/X{args.port} 2>/dev/null")
             with open(error_log_path, "a", encoding="utf-8") as f:
                 f.write("=" * 80 + "\n")
                 f.write(f"{datetime.now().isoformat(timespec='seconds')}\n")
@@ -173,6 +175,8 @@ def cli():
                 return 1
             print(f"Retrying... {retry_count + 1}/{args.retry_count}", file=sys.stderr)
             retry_count += 1
+        finally:
+            _cleanup(args.port)
     
     return 0
 
