@@ -34,41 +34,34 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
     # Xvfb 起動
     print(f"Launching Xvfb (display={display})...", end="", file=sys.stderr)
     xvfb_proc = subprocess.Popen(
-        ["Xvfb", display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-ac"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+        ["Xvfb", display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-ac"]
     )
 
     sleep(1)
     if xvfb_proc.poll() is not None:
-        out, err = xvfb_proc.communicate(timeout=3)
-        msg = f"Failed to start Xvfb (display={display})"
-        if err:
-            msg += f"\n  stderr: {err.decode('utf-8', errors='replace')[:500]}"
-        if out:
-            msg += f"\n  stdout: {out.decode('utf-8', errors='replace')[:500]}"
         raise RuntimeError(msg)
 
-    print(f"{CR}{CLEAR_LINE}{GREEN}✓ Completed: Xvfb {display} ready{RESET}", file=sys.stderr)
+    print(f"{CR}{CLEAR_LINE}{GREEN}Completed: Xvfb {display} ready{RESET}", file=sys.stderr)
 
     os.environ["DISPLAY"] = display
 
-    # Brave 起動
-    print(f"Launching Brave (port={port})... waiting", end="", file=sys.stderr)
+    # # Brave 起動
+    # print(f"Launching Brave (port={port})... waiting", end="", file=sys.stderr)
     brave_proc = subprocess.Popen(
         [
             "/usr/bin/brave-browser",
             f"--remote-debugging-port={port}",
             f"--user-data-dir={dir}/brave",
             "--no-sandbox",
+            "--headless"
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         env=os.environ
     )
 
     # Brave のデバッグポートが利用可能になるまで待つ（秒数カウント付き）
-    timeout = 30
+    timeout = 5
     start = time()
     connected = False
     while time() - start < timeout:
@@ -172,7 +165,7 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
         print(f"Quality: {quality}", file=sys.stderr)
 
         # Stop video and seek to start
-        page.evaluate("document.querySelector('video')?.click()")
+        # page.evaluate("document.querySelector('video')?.click()")
         page.evaluate(f"""
             () => {{
                 const video = document.querySelector('video');
@@ -188,6 +181,40 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
         while buffered < duration or buffered == 0: # なぜか、0秒でロード完了してしまうことがあるので、0秒より大きくなるまで待つ。
             old_buffered = buffered
 
+            state = page.evaluate("""
+                () => {
+                    const video = document.querySelector("video");
+                    const ranges = [];
+
+                    if (!video) {
+                        return {
+                            found: false,
+                            ranges: []
+                        };
+                    }
+
+                    for (let i = 0; i < video.buffered.length; i++) {
+                        ranges.push([
+                            video.buffered.start(i),
+                            video.buffered.end(i)
+                        ]);
+                    }
+
+                    return {
+                        found: true,
+                        ranges: ranges,
+                        currentTime: video.currentTime,
+                        duration: video.duration,
+                        paused: video.paused,
+                        ended: video.ended,
+                        readyState: video.readyState,
+                        networkState: video.networkState,
+                        currentSrc: video.currentSrc,
+                        mediaError: video.error ? video.error.code : null,
+                        videoCount: document.querySelectorAll("video").length
+                    };
+                }
+            """)
             # 現在のバッファ取得済み時間を取得
             buffered = page.evaluate("""
                 () => {
@@ -218,7 +245,7 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
                 print(f"{CR}{CLEAR_LINE}{RED}✗ Failed: loading error{RESET}", file=sys.stderr)
                 raise PlayerError("Buffering error")
 
-            if buffered - seek > random.uniform(10, 20):
+            if buffered - seek > random.uniform(10, 20) and state["readyState"] == 4:
                 # random seek
                 page.evaluate(f"""
                     () => {{
@@ -235,7 +262,10 @@ def collect_data(url: str, port: int=9222, dir: str="", debug: bool=False) -> di
                     batches.append(batch)
 
             print(
-                f"{CR}{CLEAR_LINE}Loading buffer and collecting data...  loaded: {int(buffered)} / {int(duration)} sec｜collected: {len(batches)} items",
+                f"{CR}{CLEAR_LINE}Loading buffer and collecting data..."
+                f"  loaded: {int(buffered)} / {int(duration)} sec"
+                f"｜collected: {len(batches)} items"
+                f"{state}",
                 end="",
                 flush=True,
                 file=sys.stderr
